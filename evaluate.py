@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 from typing import Dict, List
 
 import numpy as np
@@ -17,14 +18,34 @@ from border_env import BorderEnv
 from mappo_trainer import MAPPOTrainer
 
 
-DROP_RATES: List[float] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+DROP_RATES: List[float] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+# All systems evaluated under the SAME adversarial conditions:
+#   - Random spoofing (p_spoof=0.1) on all links
+#   - Targeted adversary: drone 1 is compromised (always spoofs)
+# Only System C has a trust mechanism to detect and isolate the bad drone.
+EVAL_SPOOF_RATE: float = 0.1
+EVAL_SPOOF_STD: float = 2.0
+COMPROMISED_DRONE: int = 1
+
+
+def checkpoint_sort_key(path: Path) -> tuple[int, str]:
+    """Sort checkpoints by numeric step, not lexicographic filename."""
+    match = re.search(r"step_(\d+)\.pt$", path.name)
+    if match:
+        return (int(match.group(1)), path.name)
+    if path.name == "final.pt":
+        return (-1, path.name)
+    return (-2, path.name)
 
 
 def find_best_checkpoint(run_name: str) -> Path:
     """Select checkpoint with highest step number for a run."""
     run_dir = Path("checkpoints") / run_name
     assert run_dir.exists(), f"Checkpoint directory not found: {run_dir}"
-    ckpts = sorted(run_dir.glob("step_*.pt"))
+    best = run_dir / "best.pt"
+    if best.exists():
+        return best
+    ckpts = sorted(run_dir.glob("step_*.pt"), key=checkpoint_sort_key)
     if ckpts:
         return ckpts[-1]
     final = run_dir / "final.pt"
@@ -51,13 +72,16 @@ def evaluate_condition(
 ) -> Dict[str, float]:
     """Evaluate one (system, seed, drop_rate) condition."""
     use_trust = system == "C"
+    p_spoof = EVAL_SPOOF_RATE  # same adversarial conditions for all systems
 
     env = BorderEnv(
         use_pybullet=False,
         domain_rand=False,
         p_drop=drop_rate,
-        p_spoof=0.0,
+        p_spoof=p_spoof,
+        spoof_std=EVAL_SPOOF_STD,
         use_trust=use_trust,
+        compromised_drone=COMPROMISED_DRONE,
         seed=seed,
     )
 
@@ -123,6 +147,7 @@ def evaluate_condition(
         "mean_reward": float(np.mean(rewards_list)) if rewards_list else 0.0,
         "mean_trust": float(np.mean(trust_list)) if trust_list else 0.0,
         "mean_battery": float(np.mean(battery_list)) if battery_list else 0.0,
+        "p_spoof": p_spoof,
     }
 
 

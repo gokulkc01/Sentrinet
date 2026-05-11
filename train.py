@@ -49,7 +49,7 @@ def build_env(system: str, seed: int) -> BorderEnv:
             use_pybullet=False,
             domain_rand=True,
             p_drop=0.2,
-            p_spoof=0.0,
+            p_spoof=0.1,
             use_trust=True,
             seed=seed,
         )

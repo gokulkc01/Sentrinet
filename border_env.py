@@ -121,6 +121,7 @@ class BorderEnv(ParallelEnv):
         p_spoof: float = 0.0,
         spoof_std: float = 2.0,
         use_trust: bool = True,
+        compromised_drone: Optional[int] = None,
         seed: Optional[int] = None,
     ):
         super().__init__()
@@ -128,6 +129,7 @@ class BorderEnv(ParallelEnv):
         self.use_pybullet = use_pybullet and _PYBULLET
         self.domain_rand  = domain_rand
         self.use_trust    = use_trust
+        self.compromised_drone = compromised_drone
         self.rng          = np.random.default_rng(seed)
 
         self.possible_agents = [f"drone_{i}" for i in range(N_DRONES)] + ["sensor_0"]
@@ -333,6 +335,19 @@ class BorderEnv(ParallelEnv):
                 self.channel.set_drop_rate(effective_drop)
                 msg = honest[sender][np.newaxis, :]
                 recv, drops = self.channel.transmit(msg)
+
+                # Targeted adversary: compromised drone reports ADVERSARIAL position
+                # (mirror image of true intruder pos relative to the sender)
+                # This actively misleads receivers toward the wrong location.
+                if (self.compromised_drone is not None
+                        and sender == self.compromised_drone
+                        and not drops[0]):
+                    fake_pos = 2.0 * self.drone_pos[sender][:3] - true_pos
+                    fake_pos = np.clip(fake_pos, [0,0,0],
+                                       [WORLD_XY, WORLD_XY, MAX_ALT])
+                    fake_vel = -self.intruder_vel
+                    recv[0] = np.concatenate([fake_pos, fake_vel]).astype(np.float32)
+
                 recv_msgs[receiver, sender] = recv[0]
                 drop_masks[receiver, sender] = drops[0]
 
@@ -357,14 +372,19 @@ class BorderEnv(ParallelEnv):
     def _compute_rewards(self, actions, sensor_alert_for_reward: int) -> Dict[str, float]:
         dists    = np.linalg.norm(self.drone_pos - self.intruder_pos, axis=1)
         captured = self._captured()
-        sec_fail = float(self.channel.get_stats()["empirical_spoof_rate"] > 0.05)
+        empirical_spoof = self.channel.get_stats()["empirical_spoof_rate"]
+        # Proportional security penalty instead of binary cliff.
+        # This avoids drowning the pursuit reward when p_spoof is constant
+        # during training (e.g. p_spoof=0.1 always exceeds the old 0.05
+        # threshold, causing -5.0 every step and masking all other signals).
+        sec_penalty = min(1.0, empirical_spoof)  # scales 0→1 with spoof rate
         # Min distance across team (encourages at least one drone to close in)
         min_dist = dists.min()
         rew: Dict[str, float] = {}
         for i in range(N_DRONES):
             r  = -W2                                 # time penalty (-0.1/step)
             r -= W3 * (1.0 - self.battery[i])        # energy cost
-            r -= W4 * sec_fail                       # security penalty
+            r -= W4 * sec_penalty                    # proportional security cost
 
             # ── Distance shaping (continuous pursuit signal) ──
             # Reward for getting closer vs previous step (Δdist)

@@ -17,6 +17,10 @@ from torch.distributions import Normal
 class PolicyNet(nn.Module):
     """Actor network mapping 20-dim drone observations to 3-dim actions."""
 
+    LOG_STD_MIN = -5.0
+    LOG_STD_MAX = 1.0
+    ACTION_EPS = 1e-6
+
     def __init__(self, obs_dim: int = 20, act_dim: int = 3, hidden_dim: int = 128) -> None:
         super().__init__()
         self.obs_dim = obs_dim
@@ -30,7 +34,7 @@ class PolicyNet(nn.Module):
             nn.Tanh(),
         )
         self.mean_head = nn.Linear(hidden_dim, act_dim)
-        self.log_std = nn.Parameter(torch.zeros(act_dim))
+        self.log_std = nn.Parameter(torch.full((act_dim,), -0.7))
 
         self._init_weights()
 
@@ -50,15 +54,27 @@ class PolicyNet(nn.Module):
             obs: Tensor of shape (batch, 20).
 
         Returns:
-            mean: Tensor of shape (batch, 3), tanh-bounded to [-1, 1].
+            mean: Tensor of shape (batch, 3), unbounded pre-squash action mean.
             std: Tensor of shape (batch, 3).
         """
         assert obs.ndim == 2 and obs.shape[-1] == self.obs_dim, f"Expected (batch, {self.obs_dim}), got {tuple(obs.shape)}"
         feat = self.net(obs)
-        mean = torch.tanh(self.mean_head(feat))
-        log_std = torch.clamp(self.log_std, -2.0, 2.0).unsqueeze(0).expand_as(mean)
+        mean = self.mean_head(feat)
+        log_std = torch.clamp(self.log_std, self.LOG_STD_MIN, self.LOG_STD_MAX).unsqueeze(0).expand_as(mean)
         std = torch.exp(log_std)
         return mean, std
+
+    @staticmethod
+    def _atanh(x: torch.Tensor) -> torch.Tensor:
+        return 0.5 * (torch.log1p(x) - torch.log1p(-x))
+
+    def _squash_action(self, raw_action: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(raw_action)
+
+    def _squashed_log_prob(self, dist: Normal, raw_action: torch.Tensor) -> torch.Tensor:
+        squashed = self._squash_action(raw_action)
+        correction = torch.log(1.0 - squashed.pow(2) + self.ACTION_EPS).sum(dim=-1)
+        return dist.log_prob(raw_action).sum(dim=-1) - correction
 
     def distribution(self, obs: torch.Tensor) -> Normal:
         """Build Normal action distribution for a batch of observations."""
@@ -77,17 +93,17 @@ class PolicyNet(nn.Module):
             deterministic: If True, return distribution mean.
 
         Returns:
-            actions: Tensor shape (batch, 3), clipped to [-1, 1].
+            actions: Tensor shape (batch, 3), squashed to [-1, 1].
             log_probs: Tensor shape (batch,).
             entropy: Tensor shape (batch,).
         """
         dist = self.distribution(obs)
         if deterministic:
-            actions = dist.mean
+            raw_action = dist.mean
         else:
-            actions = dist.rsample()
-        actions = torch.clamp(actions, -1.0, 1.0)
-        log_probs = dist.log_prob(actions).sum(dim=-1)
+            raw_action = dist.rsample()
+        actions = self._squash_action(raw_action)
+        log_probs = self._squashed_log_prob(dist, raw_action)
         entropy = dist.entropy().sum(dim=-1)
         return actions, log_probs, entropy
 
@@ -100,7 +116,9 @@ class PolicyNet(nn.Module):
         """
         assert actions.ndim == 2 and actions.shape[-1] == self.act_dim, f"Expected (batch, {self.act_dim}), got {tuple(actions.shape)}"
         dist = self.distribution(obs)
-        log_probs = dist.log_prob(actions).sum(dim=-1)
+        clipped_actions = torch.clamp(actions, -1.0 + self.ACTION_EPS, 1.0 - self.ACTION_EPS)
+        raw_action = self._atanh(clipped_actions)
+        log_probs = self._squashed_log_prob(dist, raw_action)
         entropy = dist.entropy().sum(dim=-1)
         return log_probs, entropy
 

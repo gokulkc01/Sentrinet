@@ -1,159 +1,135 @@
-# visualize.py
-# ─────────────────────────────────────────────────────────────────────────────
-# SentryNet Phase 1 — Real-time 3D Visualisation
-#
-# Shows real CF2X quadrotor drones (scaled up) flying in the 20×20×10m
-# border surveillance world. Drones act randomly for now — Phase 2 replaces
-# the random actions with a trained MAPPO policy.
-#
-# Controls (in PyBullet window):
-#   Left click + drag   → rotate view
-#   Scroll wheel        → zoom in/out
-#   Right click + drag  → pan
-#   R                   → reset camera
-#
-# Run:
-#   python visualize.py
-#
-# Options (edit the CONFIG block below):
-#   SCALE         → drone visual size (8.0 = good default)
-#   SPEED         → simulation speed (0.02 = real-time, 0.0 = max speed)
-#   P_DROP        → packet drop rate (0.0 = clean, 0.5 = heavy attack)
-#   P_SPOOF       → spoof rate (0.0 = clean, 0.1 = light spoofing)
-#   DOMAIN_RAND   → True = different wind/mass every episode
-# ─────────────────────────────────────────────────────────────────────────────
+"""
+simulation_trial.py
+===================
+Cleaner PyBullet visualizer for SentryNet.
+
+By default this script can either:
+  - run a trained checkpoint if one is provided
+  - fall back to random actions for debugging/demo use
+
+Examples:
+  python simulation_trial.py --checkpoint checkpoints/system_A_seed0
+  python simulation_trial.py --checkpoint checkpoints/system_C_seed0 --p_drop 0.2 --use_trust
+  python simulation_trial.py --random
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import time
+
+import gym_pybullet_drones as g
+import numpy as np
+import pybullet as p
 
 from border_env import BorderEnv
-import numpy as np
-import time
-import pybullet as p
-import os
-import gym_pybullet_drones as g
+from run_trained import get_drone_actions, load_policy
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  CONFIG — edit these to change behaviour
-# ═════════════════════════════════════════════════════════════════════════════
 
-SCALE       = 8.0    # drone visual scale  (try 6–15)
-SPEED       = 0.02   # seconds per step    (0.02 = ~real-time, 0.0 = fastest)
-P_DROP      = 0.0    # packet drop rate    (0.0 = no attack, 0.5 = heavy)
-P_SPOOF     = 0.0    # spoof rate          (0.0 = no attack, 0.1 = light)
-DOMAIN_RAND = True   # randomise per episode
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  URDF paths
-# ═════════════════════════════════════════════════════════════════════════════
-
-ASSETS_DIR  = os.path.join(os.path.dirname(g.__file__), 'assets')
-CF2X_URDF   = os.path.join(ASSETS_DIR, 'cf2x.urdf')    # hunter drones
-RACER_URDF  = os.path.join(ASSETS_DIR, 'racer.urdf')   # intruder drone
-
-# Hunter colors: red, green, blue
+HUNTER_SCALE = 10.5
+TARGET_SCALE = 8.0
+DEFAULT_SPEED = 0.02
 DRONE_COLORS = [
-    [1.0, 0.2, 0.2, 1.0],
-    [0.2, 1.0, 0.2, 1.0],
-    [0.2, 0.4, 1.0, 1.0],
+    [0.93, 0.32, 0.28, 1.0],
+    [0.14, 0.72, 0.48, 1.0],
+    [0.20, 0.50, 0.93, 1.0],
 ]
+TARGET_COLOR = [0.99, 0.80, 0.18, 1.0]
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  Helpers
-# ═════════════════════════════════════════════════════════════════════════════
+ASSETS_DIR = os.path.join(os.path.dirname(g.__file__), "assets")
+CF2X_URDF = os.path.join(ASSETS_DIR, "cf2x.urdf")
+RACER_URDF = os.path.join(ASSETS_DIR, "racer.urdf")
 
-def load_drone(pb, urdf_path, position, color=None, scale=8.0):
-    """Load a drone URDF at position, optionally tint it and scale it up."""
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Visualize SentryNet episodes with cleaner visuals")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Checkpoint file or run directory. If omitted, uses random actions.")
+    parser.add_argument("--random", action="store_true",
+                        help="Force random actions even if a checkpoint is provided.")
+    parser.add_argument("--episodes", type=int, default=0,
+                        help="Number of episodes to run. 0 means loop forever.")
+    parser.add_argument("--speed", type=float, default=DEFAULT_SPEED,
+                        help="Delay between frames in seconds.")
+    parser.add_argument("--p_drop", type=float, default=0.0,
+                        help="Packet drop rate for the communication channel.")
+    parser.add_argument("--p_spoof", type=float, default=0.0,
+                        help="Spoofing rate for the communication channel.")
+    parser.add_argument("--use_trust", action="store_true",
+                        help="Enable trust-weighted aggregation.")
+    parser.add_argument("--domain-rand", action="store_true",
+                        help="Enable domain randomization per episode.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed.")
+    return parser.parse_args()
+
+
+def load_drone(pb: int, urdf_path: str, position, color, scale: float) -> int:
     body_id = p.loadURDF(
         urdf_path,
         basePosition=position,
         baseOrientation=p.getQuaternionFromEuler([0, 0, 0]),
         physicsClientId=pb,
-        flags=p.URDF_USE_SELF_COLLISION,
         globalScaling=scale,
     )
-    if color:
-        num_joints = p.getNumJoints(body_id, physicsClientId=pb)
-        for link_idx in range(-1, num_joints):
-            p.changeVisualShape(
-                body_id, link_idx,
-                rgbaColor=color,
-                physicsClientId=pb,
-            )
+    for link_idx in range(-1, p.getNumJoints(body_id, physicsClientId=pb)):
+        p.changeVisualShape(body_id, link_idx, rgbaColor=color, physicsClientId=pb)
+        p.setCollisionFilterGroupMask(body_id, link_idx, 0, 0, physicsClientId=pb)
+    p.changeDynamics(body_id, -1, mass=0.0, physicsClientId=pb)
     return body_id
 
 
-def set_camera(pb):
-    """Bird's-eye view of the full 20×20m world."""
+def set_camera(pb: int) -> None:
     p.resetDebugVisualizerCamera(
-        cameraDistance=28,
-        cameraYaw=45,
-        cameraPitch=-35,
-        cameraTargetPosition=[10, 10, 2],
+        cameraDistance=29,
+        cameraYaw=38,
+        cameraPitch=-28,
+        cameraTargetPosition=[10, 10, 3.0],
         physicsClientId=pb,
     )
 
 
-def draw_world(pb):
-    """Draw orange boundary lines and labels so the world is readable."""
-    # Border perimeter
+def draw_world(pb: int) -> None:
     corners = [
-        ([0,  0,  0], [20,  0,  0]),
-        ([20, 0,  0], [20, 20,  0]),
-        ([20, 20, 0], [0,  20,  0]),
-        ([0,  20, 0], [0,   0,  0]),
+        ([0, 0, 0], [20, 0, 0]),
+        ([20, 0, 0], [20, 20, 0]),
+        ([20, 20, 0], [0, 20, 0]),
+        ([0, 20, 0], [0, 0, 0]),
     ]
     for a, b in corners:
-        p.addUserDebugLine(a, b,
-                           lineColorRGB=[1, 0.5, 0],
-                           lineWidth=3,
-                           physicsClientId=pb)
+        p.addUserDebugLine(a, b, lineColorRGB=[0.98, 0.60, 0.16], lineWidth=3, physicsClientId=pb)
 
-    # Altitude ceiling lines at z=10
-    for corner in [[0,0], [20,0], [20,20], [0,20]]:
+    for x, y in ([0, 0], [20, 0], [20, 20], [0, 20]):
         p.addUserDebugLine(
-            [corner[0], corner[1], 0],
-            [corner[0], corner[1], 10],
-            lineColorRGB=[1, 0.5, 0],
+            [x, y, 0], [x, y, 10],
+            lineColorRGB=[0.40, 0.40, 0.40],
             lineWidth=1,
             physicsClientId=pb,
         )
 
-    # Labels
-    p.addUserDebugText("BORDER CENTRE", [9.2, 10, 0.3],
-                       textColorRGB=[1, 1, 0],
-                       textSize=1.5, physicsClientId=pb)
-    p.addUserDebugText("20m", [10, -0.5, 0],
-                       textColorRGB=[0.8, 0.8, 0.8],
-                       textSize=1.0, physicsClientId=pb)
-    p.addUserDebugText("20m", [-0.5, 10, 0],
-                       textColorRGB=[0.8, 0.8, 0.8],
-                       textSize=1.0, physicsClientId=pb)
-    p.addUserDebugText("10m altitude", [0.5, 0.5, 10],
-                       textColorRGB=[0.8, 0.8, 0.8],
-                       textSize=0.9, physicsClientId=pb)
 
-
-def add_labels(pb, drone_ids, intruder_id):
-    """Floating name tags above each drone."""
-    names  = ['Hunter-0', 'Hunter-1', 'Hunter-2']
-    colors = [[1, 0.4, 0.4], [0.4, 1, 0.4], [0.4, 0.6, 1]]
+def add_labels(pb: int, drone_ids: list[int], intruder_id: int) -> None:
     for i, did in enumerate(drone_ids):
         p.addUserDebugText(
-            names[i], [0, 0, 1.2],
-            textColorRGB=colors[i],
-            textSize=1.2,
+            f"H{i}",
+            [0, 0, 1.15],
+            textColorRGB=DRONE_COLORS[i][:3],
+            textSize=1.1,
             parentObjectUniqueId=did,
             physicsClientId=pb,
         )
     p.addUserDebugText(
-        'INTRUDER ▶', [0, 0, 1.5],
-        textColorRGB=[1, 1, 0],
-        textSize=1.3,
+        "TGT",
+        [0, 0, 1.35],
+        textColorRGB=TARGET_COLOR[:3],
+        textSize=1.1,
         parentObjectUniqueId=intruder_id,
         physicsClientId=pb,
     )
 
 
-def remove_bodies(pb, ids):
-    """Safely remove pybullet bodies."""
+def remove_bodies(pb: int, ids: list[int]) -> None:
     for bid in ids:
         try:
             p.removeBody(bid, physicsClientId=pb)
@@ -161,126 +137,98 @@ def remove_bodies(pb, ids):
             pass
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  Main
-# ═════════════════════════════════════════════════════════════════════════════
+def build_actions(env: BorderEnv, obs, policy):
+    if policy is None:
+        return {a: env.action_space(a).sample() for a in env.agents}
+    return get_drone_actions(policy, obs, deterministic=True)
 
-print("=" * 55)
-print("  SentryNet — Phase 1 Visualisation")
-print("=" * 55)
-print(f"  Drone scale   : {SCALE}x real size")
-print(f"  Sim speed     : {SPEED}s/step")
-print(f"  Attack        : drop={P_DROP}, spoof={P_SPOOF}")
-print(f"  Domain rand   : {DOMAIN_RAND}")
-print("=" * 55)
-print("  Press Ctrl+C to stop\n")
 
-env = BorderEnv(
-    use_pybullet=True,
-    render_mode='human',
-    domain_rand=DOMAIN_RAND,
-    p_drop=P_DROP,
-    p_spoof=P_SPOOF,
-)
+def main() -> None:
+    args = parse_args()
+    policy = None if args.random or not args.checkpoint else load_policy(args.checkpoint)
 
-episode = 0
+    env = BorderEnv(
+        use_pybullet=True,
+        render_mode="human",
+        domain_rand=bool(args.domain_rand),
+        p_drop=float(args.p_drop),
+        p_spoof=float(args.p_spoof),
+        use_trust=bool(args.use_trust),
+        seed=args.seed,
+    )
 
-try:
-    while True:
-        episode += 1
-        obs, info = env.reset()
-        pb = env._pb
+    mode = "random policy" if policy is None else "trained policy"
+    print("=" * 58)
+    print("  SentryNet Visualizer")
+    print("=" * 58)
+    print(f"  Control mode  : {mode}")
+    print(f"  Attacks       : drop={args.p_drop}, spoof={args.p_spoof}")
+    print(f"  Trust         : {args.use_trust}")
+    print(f"  Domain rand   : {args.domain_rand}")
+    print(f"  Frame delay   : {args.speed}s")
+    print("=" * 58)
+    print("  Press Ctrl+C to stop\n")
 
-        # ── Setup world ───────────────────────────────────────────────────
-        set_camera(pb)
-        draw_world(pb)
+    episode = 0
+    try:
+        while args.episodes == 0 or episode < args.episodes:
+            episode += 1
+            obs, _ = env.reset()
+            pb = env._pb
 
-        # ── Load real drone models ────────────────────────────────────────
-        drone_ids = []
-        for i in range(3):
-            did = load_drone(
-                pb, CF2X_URDF,
-                position=env.drone_pos[i].tolist(),
-                color=DRONE_COLORS[i],
-                scale=SCALE,
+            set_camera(pb)
+            draw_world(pb)
+
+            drone_ids = [
+                load_drone(pb, CF2X_URDF, env.drone_pos[i].tolist(), DRONE_COLORS[i], HUNTER_SCALE)
+                for i in range(3)
+            ]
+            intruder_id = load_drone(pb, RACER_URDF, env.intruder_pos.tolist(), TARGET_COLOR, TARGET_SCALE)
+            add_labels(pb, drone_ids, intruder_id)
+
+            print(
+                f"Episode {episode:>3} | intruder={env.intruder_pos.round(2)} "
+                f"| wind={env.wind_vec.round(2)} | speed={env.intruder_speed:.2f}"
             )
-            drone_ids.append(did)
 
-        intruder_id = load_drone(
-            pb, RACER_URDF,
-            position=env.intruder_pos.tolist(),
-            color=[1.0, 1.0, 0.0, 1.0],
-            scale=SCALE + 2,    # slightly bigger so intruder stands out
-        )
+            step = 0
+            while env.agents:
+                actions = build_actions(env, obs, policy)
+                obs, rew, term, trunc, info = env.step(actions)
+                step += 1
 
-        add_labels(pb, drone_ids, intruder_id)
-
-        # ── Print episode header ──────────────────────────────────────────
-        print(f'\n{"─"*55}')
-        print(f'  EPISODE {episode}')
-        print(f'{"─"*55}')
-        print(f'  Intruder at  : {env.intruder_pos.round(2)}')
-        print(f'  Wind         : {env.wind_vec.round(2)} m/s')
-        print(f'  Masses       : {env.drone_mass.round(4)} kg')
-        print(f'  Intruder spd : {env.intruder_speed:.2f} m/s')
-        print(f'{"─"*55}')
-
-        # ── Episode loop ──────────────────────────────────────────────────
-        step = 0
-        while env.agents:
-            # Random actions — Phase 2 replaces this with trained policy
-            actions = {a: env.action_space(a).sample() for a in env.agents}
-            obs, rew, term, trunc, info = env.step(actions)
-            step += 1
-
-            # ── Update drone positions and orientation ─────────────────
-            for i in range(3):
-                pos = env.drone_pos[i].tolist()
-
-                # Tilt drone in direction of travel (looks realistic)
-                vx  = float(env.drone_vel[i][0])
-                vy  = float(env.drone_vel[i][1])
-                roll  = float(np.clip(-vy * 0.12, -0.4, 0.4))
-                pitch = float(np.clip( vx * 0.12, -0.4, 0.4))
-                orn   = p.getQuaternionFromEuler([roll, pitch, 0])
+                for i in range(3):
+                    vx = float(env.drone_vel[i][0])
+                    vy = float(env.drone_vel[i][1])
+                    roll = float(np.clip(-vy * 0.12, -0.4, 0.4))
+                    pitch = float(np.clip(vx * 0.12, -0.4, 0.4))
+                    orn = p.getQuaternionFromEuler([roll, pitch, 0])
+                    p.resetBasePositionAndOrientation(
+                        drone_ids[i], env.drone_pos[i].tolist(), orn, physicsClientId=pb
+                    )
 
                 p.resetBasePositionAndOrientation(
-                    drone_ids[i], pos, orn, physicsClientId=pb)
+                    intruder_id,
+                    env.intruder_pos.tolist(),
+                    [0, 0, 0, 1],
+                    physicsClientId=pb,
+                )
 
-            # ── Update intruder position ───────────────────────────────
-            p.resetBasePositionAndOrientation(
-                intruder_id,
-                env.intruder_pos.tolist(),
-                [0, 0, 0, 1],
-                physicsClientId=pb,
-            )
+                if args.speed > 0:
+                    time.sleep(args.speed)
 
-            # ── Slow down simulation to watchable speed ────────────────
-            if SPEED > 0:
-                time.sleep(SPEED)
+            captured = bool(info["drone_0"]["captured"])
+            result = "CAPTURED" if captured else f"TIMEOUT ({step} steps)"
+            print(f"  Result: {result}\n")
 
-            # ── Terminal log every 100 steps ──────────────────────────
-            if step % 100 == 0:
-                dists = np.linalg.norm(
-                    env.drone_pos - env.intruder_pos, axis=1).round(1)
-                trust = env.trust_mods[0].get_trust_scores().round(2)
-                print(f'  Step {step:3d} '
-                      f'| Intruder: {env.intruder_pos.round(1)} '
-                      f'| Dists: {dists} '
-                      f'| Trust: {trust} '
-                      f'| Batt: {env.battery.round(2)}')
+            remove_bodies(pb, drone_ids + [intruder_id])
+            time.sleep(0.5)
 
-        # ── Episode summary ───────────────────────────────────────────────
-        captured = info['drone_0']['captured']
-        print(f'{"─"*55}')
-        print(f'  Episode {episode} ended '
-              f'| Steps: {step} '
-              f'| Captured: {captured}')
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+    finally:
+        env.close()
 
-        # ── Clean up bodies before next episode ───────────────────────────
-        remove_bodies(pb, drone_ids + [intruder_id])
-        time.sleep(1.5)
 
-except KeyboardInterrupt:
-    print('\n\nStopped by user.')
-    env.close()
+if __name__ == "__main__":
+    main()

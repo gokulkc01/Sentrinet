@@ -74,6 +74,7 @@ class MAPPOTrainer:
         )
 
         self.total_env_steps = 0
+        self.best_eval_capture_rate = float("-inf")
 
     @staticmethod
     def _drone_keys() -> List[str]:
@@ -256,13 +257,18 @@ class MAPPOTrainer:
             "approx_kl": float(np.mean(approx_kls)) if approx_kls else 0.0,
         }
 
-    def evaluate(self, n_episodes: int = 50, p_drop_eval: float = 0.0) -> Dict[str, float]:
+    def evaluate(
+        self,
+        n_episodes: int = 50,
+        p_drop_eval: float = 0.0,
+        p_spoof_eval: float = 0.0,
+    ) -> Dict[str, float]:
         """Evaluate policy deterministically on a separate environment."""
         eval_env = BorderEnv(
             use_pybullet=False,
             domain_rand=False,
             p_drop=p_drop_eval,
-            p_spoof=0.0,
+            p_spoof=p_spoof_eval,
             use_trust=getattr(self.env, "use_trust", True),
             seed=self.seed,
         )
@@ -319,6 +325,26 @@ class MAPPOTrainer:
                 "step": step,
                 "config": self.config,
                 "seed": self.seed,
+                "best_eval_capture_rate": self.best_eval_capture_rate,
+            },
+            path,
+        )
+
+    def save_best_checkpoint(self, step: int) -> None:
+        """Persist the strongest evaluated model for easier downstream usage."""
+        root = Path(str(self.config["checkpoint_dir"])) / str(self.config["run_name"])
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "best.pt"
+        torch.save(
+            {
+                "policy_state_dict": self.policy.state_dict(),
+                "value_state_dict": self.value.state_dict(),
+                "policy_opt_state_dict": self.policy_opt.state_dict(),
+                "value_opt_state_dict": self.value_opt.state_dict(),
+                "step": step,
+                "config": self.config,
+                "seed": self.seed,
+                "best_eval_capture_rate": self.best_eval_capture_rate,
             },
             path,
         )
@@ -331,6 +357,7 @@ class MAPPOTrainer:
         self.policy_opt.load_state_dict(ckpt["policy_opt_state_dict"])
         self.value_opt.load_state_dict(ckpt["value_opt_state_dict"])
         self.total_env_steps = int(ckpt.get("step", 0))
+        self.best_eval_capture_rate = float(ckpt.get("best_eval_capture_rate", float("-inf")))
 
     def train(self) -> None:
         """Run MAPPO training loop until configured total_steps."""
@@ -373,7 +400,11 @@ class MAPPOTrainer:
             }
 
             if self.total_env_steps % eval_every == 0:
-                eval_stats = self.evaluate(n_episodes=50, p_drop_eval=float(getattr(self.env.channel, "p_drop", 0.0)))
+                eval_stats = self.evaluate(
+                    n_episodes=50,
+                    p_drop_eval=float(getattr(self.env.channel, "p_drop", 0.0)),
+                    p_spoof_eval=float(getattr(self.env.channel, "p_spoof", 0.0)),
+                )
                 metrics.update(
                     {
                         "eval/capture_rate": eval_stats["capture_rate"],
@@ -382,6 +413,9 @@ class MAPPOTrainer:
                         "eval/mean_trust": eval_stats["mean_trust"],
                     }
                 )
+                if eval_stats["capture_rate"] >= self.best_eval_capture_rate:
+                    self.best_eval_capture_rate = float(eval_stats["capture_rate"])
+                    self.save_best_checkpoint(step=self.total_env_steps)
 
             if wandb is not None:
                 wandb.log(metrics, step=self.total_env_steps)

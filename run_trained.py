@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 from pathlib import Path
+import re
 import numpy as np
 import torch
 import time
@@ -23,6 +24,26 @@ from networks import PolicyNet
 from border_env import BorderEnv
 
 N_DRONES = 3
+
+
+LEGACY_POLICY_KEY_MAP = {
+    "fc1.weight": "net.0.weight",
+    "fc1.bias": "net.0.bias",
+    "fc2.weight": "net.2.weight",
+    "fc2.bias": "net.2.bias",
+    "fc_mean.weight": "mean_head.weight",
+    "fc_mean.bias": "mean_head.bias",
+}
+
+
+def checkpoint_sort_key(path: Path) -> tuple[int, str]:
+    """Sort checkpoints by numeric step, not filename string order."""
+    match = re.search(r"step_(\d+)\.pt$", path.name)
+    if match:
+        return (int(match.group(1)), path.name)
+    if path.name == "final.pt":
+        return (-1, path.name)
+    return (-2, path.name)
 
 
 def resolve_checkpoint_path(checkpoint: str) -> str:
@@ -37,10 +58,13 @@ def resolve_checkpoint_path(checkpoint: str) -> str:
         return str(p)
 
     if p.is_dir():
+        best_ckpt = p / "best.pt"
+        if best_ckpt.exists():
+            return str(best_ckpt)
         final_ckpt = p / "final.pt"
         if final_ckpt.exists():
             return str(final_ckpt)
-        step_ckpts = sorted(p.glob("step_*.pt"))
+        step_ckpts = sorted(p.glob("step_*.pt"), key=checkpoint_sort_key)
         if step_ckpts:
             return str(step_ckpts[-1])
 
@@ -55,7 +79,15 @@ def load_policy(checkpoint_path: str, device: str = "cpu") -> PolicyNet:
     checkpoint_path = resolve_checkpoint_path(checkpoint_path)
     policy = PolicyNet().to(device)
     ckpt = torch.load(checkpoint_path, map_location=device)
-    policy.load_state_dict(ckpt["policy_state_dict"])
+
+    state_dict = ckpt["policy_state_dict"]
+    if not any(key in state_dict for key in LEGACY_POLICY_KEY_MAP.values()):
+        remapped_state_dict = {
+            LEGACY_POLICY_KEY_MAP.get(key, key): value for key, value in state_dict.items()
+        }
+        state_dict = remapped_state_dict
+
+    policy.load_state_dict(state_dict)
     policy.eval()
     step = ckpt.get("total_steps", ckpt.get("step", "?"))
     step_str = f"{step:,}" if isinstance(step, int) else str(step)
@@ -143,12 +175,14 @@ def run_visual(policy, args):
     CF2X_URDF  = os.path.join(ASSETS_DIR, 'cf2x.urdf')
     RACER_URDF = os.path.join(ASSETS_DIR, 'racer.urdf')
 
-    SCALE = 8.0
+    HUNTER_SCALE = 17.5
+    TARGET_SCALE = 8.0
     DRONE_COLORS = [
-        [1.0, 0.2, 0.2, 1.0],
-        [0.2, 1.0, 0.2, 1.0],
-        [0.2, 0.4, 1.0, 1.0],
+        [0.93, 0.32, 0.28, 1.0],
+        [0.14, 0.72, 0.48, 1.0],
+        [0.20, 0.50, 0.93, 1.0],
     ]
+    TARGET_COLOR = [0.99, 0.80, 0.18, 1.0]
 
     env = BorderEnv(
         use_pybullet=True,
@@ -171,39 +205,43 @@ def run_visual(policy, args):
             pb = env._pb
 
             # Camera & world
-            p.resetDebugVisualizerCamera(28, 45, -35, [10, 10, 2], physicsClientId=pb)
+            p.resetDebugVisualizerCamera(29, 38, -28, [10, 10, 3], physicsClientId=pb)
             corners = [([0,0,0],[20,0,0]),([20,0,0],[20,20,0]),
                        ([20,20,0],[0,20,0]),([0,20,0],[0,0,0])]
             for a, b in corners:
-                p.addUserDebugLine(a, b, [1,0.5,0], 3, physicsClientId=pb)
+                p.addUserDebugLine(a, b, [0.98,0.60,0.16], 3, physicsClientId=pb)
 
             # Load drone models
             drone_ids = []
             for i in range(3):
                 did = p.loadURDF(CF2X_URDF, env.drone_pos[i].tolist(),
                                 p.getQuaternionFromEuler([0,0,0]),
-                                physicsClientId=pb, globalScaling=SCALE)
+                                physicsClientId=pb, globalScaling=HUNTER_SCALE)
                 if DRONE_COLORS[i]:
                     for link in range(-1, p.getNumJoints(did, physicsClientId=pb)):
                         p.changeVisualShape(did, link, rgbaColor=DRONE_COLORS[i],
                                            physicsClientId=pb)
+                        p.setCollisionFilterGroupMask(did, link, 0, 0, physicsClientId=pb)
+                p.changeDynamics(did, -1, mass=0.0, physicsClientId=pb)
                 drone_ids.append(did)
 
             intruder_id = p.loadURDF(RACER_URDF, env.intruder_pos.tolist(),
                                     p.getQuaternionFromEuler([0,0,0]),
-                                    physicsClientId=pb, globalScaling=SCALE+2)
+                                    physicsClientId=pb, globalScaling=TARGET_SCALE)
             for link in range(-1, p.getNumJoints(intruder_id, physicsClientId=pb)):
-                p.changeVisualShape(intruder_id, link, rgbaColor=[1,1,0,1],
+                p.changeVisualShape(intruder_id, link, rgbaColor=TARGET_COLOR,
                                    physicsClientId=pb)
+                p.setCollisionFilterGroupMask(intruder_id, link, 0, 0, physicsClientId=pb)
+            p.changeDynamics(intruder_id, -1, mass=0.0, physicsClientId=pb)
 
             # Labels
             for i, did in enumerate(drone_ids):
-                p.addUserDebugText(f'Hunter-{i}', [0,0,1.2],
+                p.addUserDebugText(f'H{i}', [0,0,1.15],
                                   textColorRGB=DRONE_COLORS[i][:3],
-                                  textSize=1.2, parentObjectUniqueId=did,
+                                  textSize=1.1, parentObjectUniqueId=did,
                                   physicsClientId=pb)
-            p.addUserDebugText('INTRUDER', [0,0,1.5], textColorRGB=[1,1,0],
-                              textSize=1.3, parentObjectUniqueId=intruder_id,
+            p.addUserDebugText('TGT', [0,0,1.35], textColorRGB=TARGET_COLOR[:3],
+                              textSize=1.1, parentObjectUniqueId=intruder_id,
                               physicsClientId=pb)
 
             print(f"\n── Episode {episode} ──")
