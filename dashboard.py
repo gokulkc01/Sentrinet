@@ -46,6 +46,14 @@ LEGACY_KEY_MAP = {
     "fc_mean.weight": "mean_head.weight", "fc_mean.bias": "mean_head.bias",
 }
 
+
+def infer_policy_obs_dim(sd):
+    if "net.0.weight" in sd:
+        return int(sd["net.0.weight"].shape[1])
+    if "fc1.weight" in sd:
+        return int(sd["fc1.weight"].shape[1])
+    raise KeyError("Could not infer policy input dimension from checkpoint")
+
 # ── Shared State ───────────────────────────────────────────────────────────
 state = {
     "drone_pos": np.zeros((3, 3)), "drone_vel": np.zeros((3, 3)),
@@ -53,7 +61,9 @@ state = {
     "battery": np.ones(3), "wind": np.zeros(3),
     "reward": 0.0, "step": 0, "episode": 1, "captured": False,
     "p_drop": 0.0, "p_spoof": 0.0, "sensor_alert": False,
+    "capture_mode": "team",
     "ch_stats": {}, "reward_hist": [], "capture_hist": [],
+    "metrics": {},
     "attack_on": False, "use_trust": True, "running": True,
     "reset_req": False, "speed": 0.02,
 }
@@ -77,11 +87,16 @@ def resolve_ckpt(path_str):
 
 def load_policy(ckpt_path):
     ckpt_path = resolve_ckpt(ckpt_path)
-    policy = PolicyNet()
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    config = ckpt.get("config", {}) if isinstance(ckpt.get("config", {}), dict) else {}
     sd = ckpt["policy_state_dict"]
     if not any(k in sd for k in LEGACY_KEY_MAP.values()):
         sd = {LEGACY_KEY_MAP.get(k, k): v for k, v in sd.items()}
+    policy = PolicyNet(
+        obs_dim=int(config.get("obs_dim", infer_policy_obs_dim(sd))),
+        hidden_dim=int(config.get("hidden_dim", 128)),
+        policy_type=str(config.get("policy_type", "mlp")).lower(),
+    )
     policy.load_state_dict(sd)
     policy.eval()
     step = ckpt.get("step", "?")
@@ -185,13 +200,18 @@ def sim_loop(policy, args):
         use_pybullet=use_pb, domain_rand=True,
         render_mode='human' if use_pb else None,
         p_drop=args.p_drop, p_spoof=args.p_spoof,
-        use_trust=args.use_trust, seed=args.seed,
+        use_trust=args.use_trust, capture_mode=args.capture_mode,
+        sustained_steps=args.sustained_steps, capture_k=args.capture_k,
+        seed=args.seed,
     )
     obs, _ = env.reset()
     episode = 1
     ep_rewards = []
     ep_captures = 0
     ep_total = 0
+    policy_state = None
+    if policy.is_recurrent:
+        policy_state = {f"drone_{i}": policy.init_hidden(1) for i in range(N_DRONES)}
 
     # Set up PyBullet models for the first episode
     pb_drone_ids, pb_intruder_id = None, None
@@ -208,6 +228,8 @@ def sim_loop(policy, args):
                 if use_pb and pb_drone_ids is not None:
                     _cleanup_pybullet_models(env, pb_drone_ids, pb_intruder_id)
                 obs, _ = env.reset()
+                if policy.is_recurrent:
+                    policy_state = {f"drone_{i}": policy.init_hidden(1) for i in range(N_DRONES)}
                 if use_pb and env._pb is not None:
                     pb_drone_ids, pb_intruder_id = _setup_pybullet_episode(env)
                 episode += 1
@@ -223,8 +245,17 @@ def sim_loop(policy, args):
 
         actions = {}
         for i in range(N_DRONES):
-            a, _ = policy.get_action(obs[f"drone_{i}"], deterministic=True)
-            actions[f"drone_{i}"] = a
+            if policy.is_recurrent:
+                hidden_in = policy_state[f"drone_{i}"]
+                a, _, hidden_out = policy.step(obs[f"drone_{i}"], deterministic=True, hidden_state=hidden_in)
+                actions[f"drone_{i}"] = a
+                if policy.policy_type == "lstm":
+                    policy_state[f"drone_{i}"] = (hidden_out[0].squeeze(0), hidden_out[1].squeeze(0))
+                else:
+                    policy_state[f"drone_{i}"] = hidden_out.squeeze(0)
+            else:
+                a, _ = policy.get_action(obs[f"drone_{i}"], deterministic=True)
+                actions[f"drone_{i}"] = a
         actions["sensor_0"] = 1 if obs["sensor_0"][0] > 0.5 else 0
 
         obs, rew, term, trunc, info = env.step(actions)
@@ -250,6 +281,14 @@ def sim_loop(policy, args):
             state["step"] = env.step_count
             state["sensor_alert"] = bool(env.sensor_alert)
             state["ch_stats"] = env.channel.get_stats()
+            state["capture_mode"] = env.capture_mode
+            state["metrics"] = {
+                "n_close": float(info.get("drone_0", {}).get("n_close", 0)),
+                "mean_team_distance": float(info.get("drone_0", {}).get("mean_team_distance", 0.0)),
+                "formation_spread": float(info.get("drone_0", {}).get("formation_spread", 0.0)),
+                "angular_coverage_score": float(info.get("drone_0", {}).get("angular_coverage_score", 0.0)),
+                "capture_count": int(bool(info.get("drone_0", {}).get("captured", False))),
+            }
             # keep last 200 reward values for chart
             rh = state["reward_hist"]
             rh.append(mean_rew)
@@ -465,10 +504,16 @@ def draw_info_panel(surf, s, font, font_sm, x0, y0, pw, ph):
     yy = y0 + 28
     wind = s["wind"]
     wind_spd = float(np.linalg.norm(wind)) * 3.6
+    metrics = s.get("metrics", {})
     items = [
         ("Wind", f"{wind_spd:.1f} km/h"),
         ("Wind Vec", f"[{wind[0]:.1f}, {wind[1]:.1f}, {wind[2]:.1f}]"),
         ("Trust Mode", "ON" if s["use_trust"] else "OFF"),
+        ("Capture Mode", s.get("capture_mode", "team")),
+        ("n_close", str(int(metrics.get("n_close", 0)))),
+        ("Team Dist", f"{float(metrics.get('mean_team_distance', 0.0)):.2f}"),
+        ("Formation", f"{float(metrics.get('formation_spread', 0.0)):.2f}"),
+        ("Coverage", f"{float(metrics.get('angular_coverage_score', 0.0)):.2f}"),
     ]
     for label, val in items:
         lt = font_sm.render(label, True, TEXT_DIM)
@@ -503,6 +548,9 @@ def main():
     parser.add_argument("--p_drop", type=float, default=0.0)
     parser.add_argument("--p_spoof", type=float, default=0.0)
     parser.add_argument("--use_trust", action="store_true")
+    parser.add_argument("--capture-mode", choices=["team", "sustained"], default="team")
+    parser.add_argument("--sustained-steps", type=int, default=3)
+    parser.add_argument("--capture-k", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pybullet", action="store_true",
                         help="Also open PyBullet 3D window (synced with dashboard)")
@@ -516,6 +564,7 @@ def main():
         state["p_drop"] = args.p_drop
         state["p_spoof"] = args.p_spoof
         state["use_trust"] = args.use_trust
+        state["capture_mode"] = args.capture_mode
         state["speed"] = args.speed
 
     sim = threading.Thread(target=sim_loop, args=(policy, args), daemon=True)
@@ -560,6 +609,7 @@ def main():
 
         with lock:
             s = {k: (v.copy() if isinstance(v, np.ndarray) else
+                      v.copy() if isinstance(v, dict) else
                       list(v) if isinstance(v, list) else v)
                  for k, v in state.items()}
 

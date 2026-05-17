@@ -36,6 +36,30 @@ LEGACY_POLICY_KEY_MAP = {
 }
 
 
+def infer_policy_obs_dim(state_dict) -> int:
+    """Infer the policy observation dimension from the first linear layer."""
+    if "net.0.weight" in state_dict:
+        return int(state_dict["net.0.weight"].shape[1])
+    if "fc1.weight" in state_dict:
+        return int(state_dict["fc1.weight"].shape[1])
+    # fallback: find the first 2D weight tensor and use its input dim
+    for k, v in state_dict.items():
+        try:
+            if hasattr(v, "ndim") and v.ndim == 2:
+                return int(v.shape[1])
+        except Exception:
+            continue
+    raise KeyError("Could not infer PolicyNet input dimension from checkpoint")
+
+
+def slice_obs_for_policy(obs, policy: PolicyNet):
+    """Trim observations to the policy's expected width for legacy checkpoints."""
+    obs_dim = int(getattr(policy, "obs_dim", len(obs)))
+    if len(obs) > obs_dim:
+        return obs[:obs_dim]
+    return obs
+
+
 def checkpoint_sort_key(path: Path) -> tuple[int, str]:
     """Sort checkpoints by numeric step, not filename string order."""
     match = re.search(r"step_(\d+)\.pt$", path.name)
@@ -77,8 +101,8 @@ def resolve_checkpoint_path(checkpoint: str) -> str:
 def load_policy(checkpoint_path: str, device: str = "cpu") -> PolicyNet:
     """Load a trained PolicyNet from checkpoint."""
     checkpoint_path = resolve_checkpoint_path(checkpoint_path)
-    policy = PolicyNet().to(device)
     ckpt = torch.load(checkpoint_path, map_location=device)
+    config = ckpt.get("config", {}) if isinstance(ckpt.get("config", {}), dict) else {}
 
     state_dict = ckpt["policy_state_dict"]
     if not any(key in state_dict for key in LEGACY_POLICY_KEY_MAP.values()):
@@ -86,6 +110,11 @@ def load_policy(checkpoint_path: str, device: str = "cpu") -> PolicyNet:
             LEGACY_POLICY_KEY_MAP.get(key, key): value for key, value in state_dict.items()
         }
         state_dict = remapped_state_dict
+
+    policy_type = str(config.get("policy_type", "mlp")).lower()
+    obs_dim = int(config.get("obs_dim", infer_policy_obs_dim(state_dict)))
+    hidden_dim = int(config.get("hidden_dim", 128))
+    policy = PolicyNet(obs_dim=obs_dim, hidden_dim=hidden_dim, policy_type=policy_type).to(device)
 
     policy.load_state_dict(state_dict)
     policy.eval()
@@ -95,16 +124,29 @@ def load_policy(checkpoint_path: str, device: str = "cpu") -> PolicyNet:
     return policy
 
 
-def get_drone_actions(policy, obs_dict, device="cpu", deterministic=True):
+def get_drone_actions(policy, obs_dict, policy_state=None, device="cpu", deterministic=True):
     """Get actions for all drones from the trained policy."""
     action_dict = {}
+    next_state = None
+    if policy.is_recurrent:
+        next_state = {}
     for i in range(N_DRONES):
-        action, _ = policy.get_action(obs_dict[f"drone_{i}"], deterministic=deterministic)
-        action_dict[f"drone_{i}"] = action
+        obs_i = slice_obs_for_policy(obs_dict[f"drone_{i}"], policy)
+        if policy.is_recurrent:
+            hidden_in = policy_state[f"drone_{i}"]
+            action, _, hidden_out = policy.step(obs_i, deterministic=deterministic, hidden_state=hidden_in)
+            action_dict[f"drone_{i}"] = action
+            if policy.policy_type == "lstm":
+                next_state[f"drone_{i}"] = (hidden_out[0].squeeze(0), hidden_out[1].squeeze(0))
+            else:
+                next_state[f"drone_{i}"] = hidden_out.squeeze(0)
+        else:
+            action, _ = policy.get_action(obs_i, deterministic=deterministic)
+            action_dict[f"drone_{i}"] = action
 
     # Sensor: reactive rule (trigger when alert detected)
     action_dict["sensor_0"] = 1 if obs_dict["sensor_0"][0] > 0.5 else 0
-    return action_dict
+    return action_dict, next_state
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,30 +156,47 @@ def run_stats(policy, args):
     """Run N episodes and print capture statistics."""
     env = BorderEnv(
         use_pybullet=False,
-        domain_rand=True,
+        domain_rand=bool(args.domain_rand),
         p_drop=args.p_drop,
         p_spoof=args.p_spoof,
         use_trust=args.use_trust,
+        capture_mode=args.capture_mode,
+        sustained_steps=args.sustained_steps,
+        capture_k=args.capture_k,
         seed=args.seed,
     )
 
     captures = 0
     total_steps = 0
     rewards_all = []
+    n_close_all = []
+    team_distance_all = []
+    formation_all = []
+    coverage_all = []
+    policy_state = None
+    if policy.is_recurrent:
+        policy_state = {f"drone_{i}": policy.init_hidden(1) for i in range(N_DRONES)}
 
     print(f"\nRunning {args.episodes} episodes  |  p_drop={args.p_drop}  "
-          f"p_spoof={args.p_spoof}  use_trust={args.use_trust}\n")
+          f"p_spoof={args.p_spoof}  use_trust={args.use_trust}  capture_mode={args.capture_mode}\n")
 
     for ep in range(1, args.episodes + 1):
         obs, _ = env.reset()
+        if policy.is_recurrent:
+            policy_state = {f"drone_{i}": policy.init_hidden(1) for i in range(N_DRONES)}
         ep_reward = 0.0
         step = 0
 
         while env.agents:
-            action_dict = get_drone_actions(policy, obs, deterministic=True)
+            action_dict, policy_state = get_drone_actions(policy, obs, policy_state=policy_state, deterministic=True)
             obs, rew, term, trunc, info = env.step(action_dict)
             ep_reward += sum(rew[f"drone_{i}"] for i in range(N_DRONES)) / N_DRONES
             step += 1
+            info0 = info.get("drone_0", {})
+            n_close_all.append(float(info0.get("n_close", 0)))
+            team_distance_all.append(float(info0.get("mean_team_distance", 0.0)))
+            formation_all.append(float(info0.get("formation_spread", 0.0)))
+            coverage_all.append(float(info0.get("angular_coverage_score", 0.0)))
 
         captured = info.get("drone_0", {}).get("captured", False)
         if captured:
@@ -150,7 +209,11 @@ def run_stats(policy, args):
             print(f"  Episode {ep:>4}/{args.episodes}  |  "
                   f"Captures: {captures:>3}  |  Rate: {rate:5.1f}%  |  "
                   f"Avg reward: {np.mean(rewards_all):>7.2f}  |  "
-                  f"Avg length: {total_steps/ep:>5.0f}")
+                                    f"Avg length: {total_steps/ep:>5.0f}  |  "
+                                    f"NClose: {np.mean(n_close_all):>4.2f}  |  "
+                                    f"TeamDist: {np.mean(team_distance_all):>5.2f}  |  "
+                                    f"Form: {np.mean(formation_all):>5.2f}  |  "
+                                    f"Cov: {np.mean(coverage_all):>5.2f}")
 
     rate = captures / args.episodes * 100
     print(f"\n{'='*55}")
@@ -159,6 +222,10 @@ def run_stats(policy, args):
     print(f"  Capture rate : {rate:.1f}%  ({captures}/{args.episodes})")
     print(f"  Avg reward   : {np.mean(rewards_all):.2f}")
     print(f"  Avg length   : {total_steps / args.episodes:.0f} steps")
+    print(f"  Mean n_close : {np.mean(n_close_all):.2f}")
+    print(f"  Mean team dist: {np.mean(team_distance_all):.2f}")
+    print(f"  Mean formation: {np.mean(formation_all):.2f}")
+    print(f"  Mean coverage : {np.mean(coverage_all):.2f}")
     print(f"{'='*55}\n")
 
 
@@ -187,21 +254,27 @@ def run_visual(policy, args):
     env = BorderEnv(
         use_pybullet=True,
         render_mode='human',
-        domain_rand=True,
+        domain_rand=bool(args.domain_rand),
         p_drop=args.p_drop,
         p_spoof=args.p_spoof,
         use_trust=args.use_trust,
+        capture_mode=args.capture_mode,
+        sustained_steps=args.sustained_steps,
+        capture_k=args.capture_k,
     )
 
     episode = 0
     print(f"\nVisualizing trained policy  |  p_drop={args.p_drop}  "
-          f"p_spoof={args.p_spoof}  use_trust={args.use_trust}")
+        f"p_spoof={args.p_spoof}  use_trust={args.use_trust}  capture_mode={args.capture_mode}")
     print("Press Ctrl+C to stop\n")
 
     try:
         while True:
             episode += 1
             obs, _ = env.reset()
+            policy_state = None
+            if policy.is_recurrent:
+                policy_state = {f"drone_{i}": policy.init_hidden(1) for i in range(3)}
             pb = env._pb
 
             # Camera & world
@@ -251,7 +324,7 @@ def run_visual(policy, args):
 
             step = 0
             while env.agents:
-                action_dict = get_drone_actions(policy, obs, deterministic=True)
+                action_dict, policy_state = get_drone_actions(policy, obs, policy_state=policy_state, deterministic=True)
                 obs, rew, term, trunc, info = env.step(action_dict)
                 step += 1
 
@@ -301,6 +374,16 @@ if __name__ == "__main__":
                         help="Spoof rate during evaluation (default: 0.0)")
     parser.add_argument("--use_trust", action="store_true",
                         help="Enable trust-weighted aggregation")
+    parser.add_argument("--capture-mode", choices=["team", "sustained"], default="team",
+                        help="Capture rule used during evaluation")
+    parser.add_argument("--sustained-steps", type=int, default=3,
+                        help="Required consecutive in-range steps for sustained mode")
+    parser.add_argument("--capture-k", type=int, default=2,
+                        help="Number of drones required for team mode fallback or experiments")
+    parser.add_argument("--domain-rand", dest="domain_rand", action="store_true", default=True,
+                        help="Enable domain randomization during evaluation")
+    parser.add_argument("--no-domain-rand", dest="domain_rand", action="store_false",
+                        help="Disable domain randomization during evaluation")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed")
 

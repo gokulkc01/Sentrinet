@@ -33,17 +33,25 @@ def load_policy(ckpt_path):
         "fc_mean.weight": "mean_head.weight", "fc_mean.bias": "mean_head.bias",
     }
     ckpt_path = resolve_ckpt(ckpt_path)
-    policy = PolicyNet()
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt["policy_state_dict"]
     if not any(k in sd for k in LEGACY_KEY_MAP.values()):
         sd = {LEGACY_KEY_MAP.get(k, k): v for k, v in sd.items()}
+    obs_dim = int(sd["net.0.weight"].shape[1] if "net.0.weight" in sd else sd["fc1.weight"].shape[1])
+    policy = PolicyNet(obs_dim=obs_dim)
     policy.load_state_dict(sd)
     policy.eval()
     step = ckpt.get("step", "?")
     print(f"[Loaded] {ckpt_path} ({step:,} steps)" if isinstance(step, int)
           else f"[Loaded] {ckpt_path}")
     return policy
+
+
+def slice_obs_for_policy(obs, policy):
+    obs_dim = int(getattr(policy, "obs_dim", len(obs)))
+    if len(obs) > obs_dim:
+        return obs[:obs_dim]
+    return obs
 
 
 def run_episodes(policy, env, n_episodes=20, label=""):
@@ -54,7 +62,7 @@ def run_episodes(policy, env, n_episodes=20, label=""):
         while not done:
             actions = {}
             for i in range(3):
-                a, _ = policy.get_action(obs[f"drone_{i}"], deterministic=True)
+                a, _ = policy.get_action(slice_obs_for_policy(obs[f"drone_{i}"], policy), deterministic=True)
                 actions[f"drone_{i}"] = a
             actions["sensor_0"] = 1 if obs["sensor_0"][0] > 0.5 else 0
             obs, rew, term, trunc, info = env.step(actions)

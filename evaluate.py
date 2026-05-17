@@ -69,6 +69,7 @@ def evaluate_condition(
     seed: int,
     drop_rate: float,
     n_episodes: int,
+    capture_mode: str,
 ) -> Dict[str, float]:
     """Evaluate one (system, seed, drop_rate) condition."""
     use_trust = system == "C"
@@ -82,8 +83,13 @@ def evaluate_condition(
         spoof_std=EVAL_SPOOF_STD,
         use_trust=use_trust,
         compromised_drone=COMPROMISED_DRONE,
+        capture_mode=capture_mode,
         seed=seed,
     )
+
+    ckpt = find_best_checkpoint(f"system_{system}_seed{seed}")
+    ckpt_data = torch.load(ckpt, map_location="cpu")
+    ckpt_config = ckpt_data.get("config", {}) if isinstance(ckpt_data.get("config", {}), dict) else {}
 
     trainer = MAPPOTrainer(
         env=env,
@@ -92,16 +98,23 @@ def evaluate_condition(
             "total_steps": 1,
             "run_name": f"system_{system}_seed{seed}",
             "seed": seed,
+            "policy_type": ckpt_config.get("policy_type", "mlp"),
+            "hidden_dim": int(ckpt_config.get("hidden_dim", 128)),
         },
     )
 
-    ckpt = find_best_checkpoint(f"system_{system}_seed{seed}")
     trainer.load_checkpoint(str(ckpt))
 
     captures = 0
     steps_list: List[int] = []
     rewards_list: List[float] = []
     trust_list: List[float] = []
+    n_close_list: List[float] = []
+    team_distance_list: List[float] = []
+    formation_list: List[float] = []
+    coverage_list: List[float] = []
+    # per-episode trust trajectories saved to disk per condition
+    trust_trajs: List[List[List[float]]] = []  # episodes -> steps -> nested trust lists
     battery_list: List[float] = []
 
     for ep in range(n_episodes):
@@ -111,6 +124,7 @@ def evaluate_condition(
         ep_steps = 0
         final_info: Dict[str, object] = {}
 
+        ep_trusts: List[List[List[float]]] = []
         while not done:
             actions = {}
             for i in range(3):
@@ -119,8 +133,16 @@ def evaluate_condition(
             actions["sensor_0"] = 1 if float(obs["sensor_0"][0]) > 0.5 else 0
 
             obs, rew, term, trunc, info = env.step(actions)
+            # snapshot trust scores for this step (list per receiver)
+            step_trust = [tm.get_trust_scores().tolist() for tm in env.trust_mods]
+            ep_trusts.append(step_trust)
             ep_reward += float(np.mean([rew[f"drone_{i}"] for i in range(3)]))
             ep_steps += 1
+            info0 = info.get("drone_0", {})
+            n_close_list.append(float(info0.get("n_close", 0)))
+            team_distance_list.append(float(info0.get("mean_team_distance", 0.0)))
+            formation_list.append(float(info0.get("formation_spread", 0.0)))
+            coverage_list.append(float(info0.get("angular_coverage_score", 0.0)))
             done = any(term[f"drone_{i}"] or trunc[f"drone_{i}"] for i in range(3))
             final_info = info.get("drone_0", {})
 
@@ -128,6 +150,7 @@ def evaluate_condition(
         steps_list.append(ep_steps)
         rewards_list.append(ep_reward)
         trust_list.append(mean_trust_from_info(final_info))
+        trust_trajs.append(ep_trusts)
 
         drone_pos = final_info.get("drone_pos")
         if isinstance(drone_pos, np.ndarray):
@@ -138,6 +161,13 @@ def evaluate_condition(
 
     env.close()
 
+    # Save trust trajectories for this condition for later plotting/analysis
+    out_dir = Path("results") / "trust_trajs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fname = out_dir / f"trust_{system}_seed{seed}_drop{int(drop_rate*100)}.npz"
+    # store as compressed pickle-friendly object
+    np.savez_compressed(str(fname), episodes=np.array(trust_trajs, dtype=object))
+
     return {
         "system": system,
         "seed": seed,
@@ -147,7 +177,12 @@ def evaluate_condition(
         "mean_reward": float(np.mean(rewards_list)) if rewards_list else 0.0,
         "mean_trust": float(np.mean(trust_list)) if trust_list else 0.0,
         "mean_battery": float(np.mean(battery_list)) if battery_list else 0.0,
+        "mean_n_close": float(np.mean(n_close_list)) if n_close_list else 0.0,
+        "mean_team_distance": float(np.mean(team_distance_list)) if team_distance_list else 0.0,
+        "mean_formation_spread": float(np.mean(formation_list)) if formation_list else 0.0,
+        "mean_angular_coverage": float(np.mean(coverage_list)) if coverage_list else 0.0,
         "p_spoof": p_spoof,
+        "capture_mode": capture_mode,
     }
 
 
@@ -157,6 +192,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--system", choices=["A", "B", "C", "all"], default="all")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--episodes", type=int, default=200)
+    parser.add_argument("--capture-mode", choices=["team", "sustained"], default="team")
     parser.add_argument("--fast", action="store_true", help="Run 20 episodes per condition")
     return parser.parse_args()
 
@@ -172,7 +208,7 @@ def main() -> None:
         for seed in args.seeds:
             for drop in DROP_RATES:
                 print(f"Evaluating system={system} seed={seed} drop={drop:.1f} ...")
-                rows.append(evaluate_condition(system=system, seed=int(seed), drop_rate=float(drop), n_episodes=episodes))
+                rows.append(evaluate_condition(system=system, seed=int(seed), drop_rate=float(drop), n_episodes=episodes, capture_mode=args.capture_mode))
 
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)

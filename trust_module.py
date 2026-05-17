@@ -3,17 +3,18 @@ trust_module.py
 ===============
 EMA-based per-sender trust scoring.
 
-Specs (from PPT slide 14):
-  error    = || recv_pos - true_pos ||
+Specs:
+  error    = || recv_pos - reference_pos ||
   accuracy = max(0, 1 - error / max_error)
-  tau      = 0.1 * accuracy + 0.9 * tau      (on receive)
-  tau      = 0.95 * tau                        (on drop)
-  tau      ∈ [0, 1]                            (bounded always)
+  tau      = alpha * accuracy + (1-alpha) * tau   (on receive)
+  tau      = decay_on_drop * tau                    (on drop)
+  tau      ∈ [0, 1]                                 (bounded always)
 
   max_error = AdversarialChannel.MAX_SPOOF_ERROR = 5.0
 
-Convergence target: EMA scores for adversarial senders fall below 0.3
-within 200 steps (PPT Expected Outcomes).
+The reference_pos is the receiver's own local sensor estimate — NOT
+ground truth.  When the receiver has no fresh local estimate, trust
+scores are only updated via drop-decay (no accuracy signal).
 """
 
 import numpy as np
@@ -61,13 +62,16 @@ class TrustModule:
 
         # diagnostics
         self._update_count = 0
+        # history for temporal-consistency checks: last received message per sender
+        self._last_msgs = np.zeros((n_senders, 3), dtype=np.float64)
+        self._last_valid = np.zeros(n_senders, dtype=bool)
 
     # ── public API ───────────────────────────────────────────────────────────
 
     def update(
         self,
         received_pos: np.ndarray,   # shape (n_senders, 3) — x,y,z from channel
-        true_pos: np.ndarray,       # shape (3,)            — ground truth
+        reference_pos: Optional[np.ndarray],  # shape (3,) — receiver's own local estimate or None
         dropped_mask: np.ndarray,   # shape (n_senders,)    — bool, True = dropped
     ):
         """
@@ -76,29 +80,104 @@ class TrustModule:
         Parameters
         ----------
         received_pos  : x,y,z portion of received messages (first 3 dims)
-        true_pos      : ground-truth target position from env (3D)
+        reference_pos : receiver's own local sensor estimate (3D).
+                        This must NOT be ground truth — only information
+                        the receiver could physically obtain.
         dropped_mask  : True where channel dropped the packet
         """
-       # NEW
         assert received_pos.ndim == 2 and received_pos.shape[0] == self.n_senders, \
-        f"received_pos shape mismatch: {received_pos.shape}"
-        assert true_pos.ndim == 1, f"true_pos shape mismatch: {true_pos.shape}"
+            f"received_pos shape mismatch: {received_pos.shape}"
+        if reference_pos is not None:
+            assert reference_pos.ndim == 1, f"reference_pos shape mismatch: {reference_pos.shape}"
         assert dropped_mask.shape == (self.n_senders,), "dropped_mask shape mismatch"
 
+        # Helper: weighted median for 1D array
+        def _weighted_median_1d(values: np.ndarray, weights: np.ndarray) -> float:
+            # values, weights are 1D and of same length
+            idx = np.argsort(values)
+            v = values[idx]
+            w = weights[idx]
+            cum = np.cumsum(w)
+            half = 0.5 * cum[-1]
+            i = int(np.searchsorted(cum, half))
+            return float(v[min(i, len(v)-1)])
+
+        # Helper: weighted median for 3D vectors (per-dim median)
+        def _weighted_median_vec(arr: np.ndarray, weights: np.ndarray) -> np.ndarray:
+            return np.array([
+                _weighted_median_1d(arr[:, d], weights) for d in range(arr.shape[1])
+            ], dtype=np.float64)
+
+        # Consensus-based trust update (no access to ground truth).
+        # For each sender j:
+        #  - if packet dropped: apply multiplicative decay
+        #  - else: compute accuracy signals from up to two references:
+        #      * receiver's own fresh local estimate (`reference_pos`) if provided
+        #      * consensus of other non-dropped senders (median)
+        #    final accuracy = mean(available accuracies)
         for j in range(self.n_senders):
             if dropped_mask[j]:
                 # ── packet dropped: decay trust ──────────────────────────
                 self.tau[j] *= self.decay_on_drop
             else:
-                # ── received: compute accuracy and EMA update ────────────
-                error    = float(np.linalg.norm(received_pos[j] - true_pos))
-                accuracy = max(0.0, 1.0 - error / self.max_error)
-                # EMA: tau = alpha * accuracy + (1-alpha) * tau
-                self.tau[j] = self.alpha * accuracy + (1.0 - self.alpha) * self.tau[j]
+                accuracies = []
+                # reference-based accuracy (receiver's own local estimate)
+                if reference_pos is not None and reference_pos.size == 3:
+                    error_ref = float(np.linalg.norm(received_pos[j] - reference_pos))
+                    acc_ref = max(0.0, 1.0 - error_ref / self.max_error)
+                    accuracies.append(acc_ref)
+
+                # consensus-based accuracy: weighted median of other non-dropped senders
+                other_idx = [k for k in range(self.n_senders) if k != j and (not dropped_mask[k])]
+                if len(other_idx) > 0:
+                    other_msgs = received_pos[other_idx]
+                    weights = self.tau[other_idx]
+                    if weights.sum() <= 1e-8:
+                        # fallback to unweighted median
+                        consensus = np.median(other_msgs, axis=0)
+                    else:
+                        consensus = _weighted_median_vec(other_msgs, weights)
+                    error_cons = float(np.linalg.norm(received_pos[j] - consensus))
+                    acc_cons = max(0.0, 1.0 - error_cons / self.max_error)
+                    accuracies.append(acc_cons)
+
+                # temporal consistency: compare to sender's own previous message
+                if self._last_valid[j]:
+                    error_temp = float(np.linalg.norm(received_pos[j] - self._last_msgs[j]))
+                    # allow larger tolerance for temporal jumps; scale by 2*max_error
+                    acc_temp = max(0.0, 1.0 - error_temp / (2.0 * self.max_error))
+                    accuracies.append(acc_temp)
+
+                if len(accuracies) > 0:
+                    accuracy = float(sum(accuracies) / len(accuracies))
+                    # EMA: tau = alpha * accuracy + (1-alpha) * tau
+                    self.tau[j] = self.alpha * accuracy + (1.0 - self.alpha) * self.tau[j]
+                else:
+                    # No reference and no consensus available: leave tau unchanged
+                    pass
 
             # Clamp to [0, 1]
             self.tau[j] = float(np.clip(self.tau[j], 0.0, 1.0))
 
+            # update history for temporal checks when message received
+            if not dropped_mask[j]:
+                self._last_msgs[j] = received_pos[j]
+                self._last_valid[j] = True
+
+        self._update_count += 1
+
+    def decay_on_drops(self, dropped_mask: np.ndarray):
+        """Apply drop-decay only, without accuracy updates.
+
+        Called when the receiver has no fresh local estimate and therefore
+        cannot evaluate message quality.  Trust still decays for dropped
+        packets but received messages leave trust unchanged.
+        """
+        assert dropped_mask.shape == (self.n_senders,), "dropped_mask shape mismatch"
+        for j in range(self.n_senders):
+            if dropped_mask[j]:
+                self.tau[j] *= self.decay_on_drop
+                self.tau[j] = float(np.clip(self.tau[j], 0.0, 1.0))
         self._update_count += 1
 
     def get_trust_scores(self) -> np.ndarray:

@@ -53,17 +53,81 @@ except ImportError:
 N_DRONES      = 3
 MAX_STEPS     = 500
 CAPTURE_R     = 2.0      # metres
-CLOSE_R       = 5.0      # metres (partial reward)
+CLOSE_R       = 5.0      # metres (legacy shaping radius)
 WORLD_XY      = 20.0     # [0, WORLD_XY]
 MAX_ALT       = 10.0
 DT            = 0.05     # seconds per step
 MASS_NOM      = 0.027    # kg (Crazyflie 2.x)
 G             = 9.81
 MAX_SPEED     = 5.0      # m/s
-W1,W2,W3,W4  = 10.0, 0.1, 0.05, 5.0  # reward weights
-DRONE_OBS_DIM = 20
+W1,W2,W3,W4   = 10.0, 0.1, 0.05, 5.0  # legacy capture/time/energy/security weights
+W_CAPTURE     = 100.0    # terminal team-capture reward
+W_TEAM        = 2.0      # mean-distance team pursuit shaping
+W_FORMATION   = 0.8      # pairwise spacing shaping
+W_COVERAGE    = 0.8      # angular surround shaping
+W_CLOSE       = 1.5      # capture imminence shaping
+W_PARTICIPATION = 1.0    # keep all hunters engaged near the target
+TEAM_CAPTURE_MIN_DRONES = 2
+COLLISION_THRESHOLD = 1.5
+MAX_COORDINATION_DISTANCE = 8.0
+IDEAL_SPACING = 4.5
+BASE_DRONE_OBS_DIM = 23  # 20 base + 3 one-hot ID
+EXTRA_REL_OBS_DIM = 19   # target rel pos/vel + teammate rel pos/vel + distance
+DRONE_OBS_DIM = BASE_DRONE_OBS_DIM + EXTRA_REL_OBS_DIM
 SENSOR_OBS_DIM= 4
+
+# Curriculum learning phases (staged difficulty progression)
+CURRICULUM_PHASES = [
+    {
+        "name": "stage1",
+        "progress_end": 0.20,
+        "p_drop": 0.0,
+        "p_spoof": 0.0,
+        "domain_rand": False,
+        "wind_max": 0.0,
+        "noise_max": 0.0,
+    },
+    {
+        "name": "stage2",
+        "progress_end": 0.40,
+        "p_drop": 0.0,
+        "p_spoof": 0.0,
+        "domain_rand": True,
+        "wind_max": 0.35,
+        "noise_max": 0.05,
+    },
+    {
+        "name": "stage3",
+        "progress_end": 0.60,
+        "p_drop": 0.1,
+        "p_spoof": 0.0,
+        "domain_rand": True,
+        "wind_max": 0.70,
+        "noise_max": 0.08,
+    },
+    {
+        "name": "stage4",
+        "progress_end": 0.80,
+        "p_drop": 0.1,
+        "p_spoof": 0.05,
+        "domain_rand": True,
+        "wind_max": 1.00,
+        "noise_max": 0.12,
+    },
+    {
+        "name": "stage5",
+        "progress_end": 1.00,
+        "p_drop": 0.2,
+        "p_spoof": 0.1,
+        "domain_rand": True,
+        "wind_max": 1.50,
+        "noise_max": 0.20,
+    },
+]
 DRONE_ACT_DIM = 3
+STALE_THRESH  = 25       # steps before local estimate is too stale for trust
+DETECT_RANGE  = 8.0      # metres — FoV detection range
+DETECT_ANGLE  = 60.0     # degrees — FoV half-cone
 
 
 # ── Mock physics (no pybullet needed for testing) ─────────────────────────────
@@ -122,20 +186,56 @@ class BorderEnv(ParallelEnv):
         spoof_std: float = 2.0,
         use_trust: bool = True,
         compromised_drone: Optional[int] = None,
+        # Trust hyperparameters (exposed for tuning)
+        trust_alpha: float = None,
+        trust_max_error: float = None,
+        # Capture / intruder realism
+        capture_mode: str = "team",       # one of: 'team', 'sustained'
+        capture_k: int = 2,                 # for 'multi' mode: required drones
+        sustained_steps: int = 3,           # for 'sustained' mode: steps required
+        intruder_profile: str = "evasive", # one of: 'passive', 'evasive', 'reactive'
+        # Curriculum learning
+        use_curriculum: bool = False,
+        curriculum_progress: float = 0.0,  # 0.0 (easiest) to 1.0 (hardest)
         seed: Optional[int] = None,
     ):
         super().__init__()
         self.render_mode  = render_mode
         self.use_pybullet = use_pybullet and _PYBULLET
-        self.domain_rand  = domain_rand
         self.use_trust    = use_trust
-        self.compromised_drone = compromised_drone
         self.rng          = np.random.default_rng(seed)
+        
+        # Curriculum learning
+        self.use_curriculum = use_curriculum
+        self.curriculum_progress = float(curriculum_progress)
+        self.curriculum_stage = "stage1"
+        # Initialize curriculum params (will be updated if curriculum enabled)
+        self._p_drop_eff = p_drop
+        self._p_spoof_eff = p_spoof
+        self.domain_rand = domain_rand
+        self.compromised_drone = compromised_drone
+        self.capture_mode = str(capture_mode)
+        self.capture_k = int(capture_k)
+        self.sustained_steps = max(1, int(sustained_steps))
+        self.curriculum_intruder_speed = 1.5
+        self.curriculum_wind_max = 0.0
+        self.curriculum_noise_max = 0.0
+        self.curriculum_shaping_weight = 1.0
+        self.curriculum_capture_weight = 0.5
+        self._update_curriculum_params()
 
         self.possible_agents = [f"drone_{i}" for i in range(N_DRONES)] + ["sensor_0"]
         self.agents: list[str] = []
+        self.drone_obs_dim = DRONE_OBS_DIM
+        self.sensor_obs_dim = SENSOR_OBS_DIM
+        
+          # Observation normalization (running mean/std)
+        self._obs_norm_mean = np.zeros((N_DRONES, 20), dtype=np.float32)  # normalized positions, velocities, etc
+        self._obs_norm_std = np.ones((N_DRONES, 20), dtype=np.float32)
+        self._obs_norm_count = 0
+        self._normalize_obs = True  # apply normalization
 
-        # Spaces
+          # Spaces (DRONE_OBS_DIM=42: 20 base + 3 one-hot ID + 19 relative features)
         inf = np.inf
         self._obs_sp = {
             **{f"drone_{i}": spaces.Box(-inf, inf, (DRONE_OBS_DIM,), np.float32)
@@ -148,10 +248,14 @@ class BorderEnv(ParallelEnv):
             "sensor_0": spaces.Discrete(2),
         }
 
-        # Comms layer
-        self.channel    = AdversarialChannel(p_drop=p_drop, p_spoof=p_spoof,
-                                              spoof_std=spoof_std, seed=seed)
-        self.trust_mods = [TrustModule(n_senders=N_DRONES-1) for _ in range(N_DRONES)]
+        # Comms layer (will be updated by curriculum if enabled)
+        self.channel    = AdversarialChannel(p_drop=self._p_drop_eff, p_spoof=self._p_spoof_eff,
+                              spoof_std=spoof_std, seed=seed)
+        # Pass explicit trust params if provided
+        t_alpha = trust_alpha if trust_alpha is not None else TrustModule.EMA_ALPHA
+        t_maxerr = trust_max_error if trust_max_error is not None else TrustModule.MAX_ERROR
+        self.trust_mods = [TrustModule(n_senders=N_DRONES-1, max_error=t_maxerr, alpha=t_alpha)
+                   for _ in range(N_DRONES)]
         self.aggregator = TrustAggregator(n_senders=N_DRONES-1, msg_dim=6)
 
         # State (init'd in reset)
@@ -169,15 +273,86 @@ class BorderEnv(ParallelEnv):
         self.intruder_speed   = 2.5
         self.step_count  = 0
         self._prev_dists = np.full(N_DRONES, WORLD_XY)  # for reward shaping
+        self._prev_mean_team_dist = float(WORLD_XY)
+        self._local_estimates = np.zeros((N_DRONES, 6), dtype=np.float32)
+        self._estimate_age    = np.full(N_DRONES, MAX_STEPS, dtype=int)
+
+        # Legacy sustained-capture state (only used when capture_mode == 'sustained').
+        self._capture_counters = np.zeros(N_DRONES, dtype=int) if self.capture_mode == "sustained" else None
+
+        # intruder realism profile
+        self.intruder_profile = intruder_profile
 
         # PyBullet handles
         self._pb   = None
         self._dids = []
         self._iid  = None
         self._mock: Optional[_MockPhysics] = None
+        
+        # Reward shaping state (for tracking sender trust/reliability)
+        self._sender_trust_sum = np.zeros(N_DRONES, dtype=np.float32)  # for averaging
+        self._sender_reliable_count = np.zeros(N_DRONES, dtype=int)
 
     def observation_space(self, agent): return self._obs_sp[agent]
     def action_space(self, agent):      return self._act_sp[agent]
+    
+    def _update_curriculum_params(self):
+        """Select curriculum parameters based on training progress."""
+        if not self.use_curriculum:
+            return
+        prog = np.clip(self.curriculum_progress, 0.0, 1.0)
+        stage = CURRICULUM_PHASES[-1]
+        for candidate in CURRICULUM_PHASES:
+            if prog <= float(candidate["progress_end"]):
+                stage = candidate
+                break
+        prev_end = 0.0
+        for candidate in CURRICULUM_PHASES:
+            if candidate is stage:
+                break
+            prev_end = float(candidate["progress_end"])
+        stage_span = max(1e-6, float(stage["progress_end"]) - prev_end)
+        stage_progress = np.clip((prog - prev_end) / stage_span, 0.0, 1.0)
+
+        self.curriculum_stage = str(stage["name"])
+        self._p_drop_eff = float(stage["p_drop"])
+        self._p_spoof_eff = float(stage["p_spoof"])
+        self.domain_rand = bool(stage["domain_rand"])
+        self.compromised_drone = 1 if prog >= 0.60 else None
+        self.curriculum_wind_max = float(stage.get("wind_max", 0.0))
+        self.curriculum_noise_max = float(stage.get("noise_max", 0.0))
+        # Gradually increase intruder speed from easy-to-catch to full difficulty.
+        self.curriculum_intruder_speed = float(0.4 + prog * (1.5 - 0.4))
+        self.curriculum_shaping_weight = float(1.0 - prog)
+        self.curriculum_capture_weight = float(0.5 + prog)
+    
+    def update_curriculum_progress(self, progress: float):
+        """Update curriculum stage based on training progress (0.0 to 1.0)."""
+        if self.use_curriculum:
+            self.curriculum_progress = np.clip(progress, 0.0, 1.0)
+            self._update_curriculum_params()
+            # Update channel drop rates
+            if hasattr(self, 'channel'):
+                self.channel.set_drop_rate(self._p_drop_eff)
+    
+    def _normalize_obs_features(self, obs_raw: np.ndarray, drone_idx: int) -> np.ndarray:
+        """Normalize first 20 elements of observation (skip one-hot ID)."""
+        if not self._normalize_obs or obs_raw.shape[0] < 20:
+            return obs_raw
+        obs = obs_raw.copy()
+        # Update running normalization for the 20-dim base obs
+        eps = 1e-8
+        if self._obs_norm_count < 1e6:  # avoid drift after convergence
+            delta = obs[:20] - self._obs_norm_mean[drone_idx]
+            self._obs_norm_mean[drone_idx] += delta / max(1, self._obs_norm_count + 1)
+            delta2 = obs[:20] - self._obs_norm_mean[drone_idx]
+            self._obs_norm_std[drone_idx] = np.sqrt(
+                self._obs_norm_std[drone_idx]**2 + delta * delta2 / max(1, self._obs_norm_count + 1)
+            )
+            self._obs_norm_count += 1
+        # Apply normalization
+        obs[:20] = (obs[:20] - self._obs_norm_mean[drone_idx]) / (self._obs_norm_std[drone_idx] + eps)
+        return obs
 
     # ── reset ──────────────────────────────────────────────────────────────
     def reset(self, seed=None, options=None):
@@ -201,10 +376,14 @@ class BorderEnv(ParallelEnv):
         self.intruder_vel  = self._inward_vel(self.intruder_pos)
         self._noisy_int_pos= self.intruder_pos.copy()
         self._prev_dists   = np.linalg.norm(self.drone_pos - self.intruder_pos, axis=1)
-        self._agg_msgs     = np.tile(
-            np.concatenate([self.intruder_pos, self.intruder_vel]),
-            (N_DRONES, 1)
-        ).astype(np.float32)
+        self._local_estimates = np.zeros((N_DRONES, 6), dtype=np.float32)
+        self._estimate_age    = np.full(N_DRONES, MAX_STEPS, dtype=int)
+        self._agg_msgs     = np.zeros((N_DRONES, 6), dtype=np.float32)
+        if self._capture_counters is not None:
+            self._capture_counters.fill(0)
+        self._prev_mean_team_dist = float(np.mean(self._prev_dists))
+
+        # capture/intruder state already initialized in __init__
 
         if self.use_pybullet:
             self._init_pybullet()
@@ -222,16 +401,21 @@ class BorderEnv(ParallelEnv):
             self.drone_mass       = np.full(N_DRONES, MASS_NOM)
             self.wind_vec         = np.zeros(3)
             self.sensor_noise_std = 0.0
-            self.intruder_speed   = 2.5
+            self.intruder_speed   = float(self.curriculum_intruder_speed if self.use_curriculum else 2.5)
             return
-        # Mass ±18%
-        self.drone_mass = self.rng.uniform(MASS_NOM*0.82, MASS_NOM*1.18, N_DRONES)
-        # Wind up to 15 km/h
-        wmax = 15.0 / 3.6
-        self.wind_vec = self.rng.uniform(-wmax, wmax, 3)
+        # Stage-aware disturbances: early curriculum uses light randomization,
+        # later stages gradually widen the same family of disturbances.
+        mass_span = 0.18 if not self.use_curriculum else np.clip(0.05 + 0.13 * self.curriculum_progress, 0.05, 0.18)
+        self.drone_mass = self.rng.uniform(MASS_NOM * (1.0 - mass_span), MASS_NOM * (1.0 + mass_span), N_DRONES)
+        wmax = self.curriculum_wind_max if self.use_curriculum else 15.0 / 3.6
+        self.wind_vec = self.rng.uniform(-wmax, wmax, 3) if wmax > 0 else np.zeros(3)
         self.wind_vec[2] *= 0.25
-        self.sensor_noise_std = float(self.rng.uniform(0.0, 0.30))
-        self.intruder_speed   = float(self.rng.uniform(1.5, 4.0))
+        nmax = self.curriculum_noise_max if self.use_curriculum else 0.30
+        self.sensor_noise_std = float(self.rng.uniform(0.0, nmax)) if nmax > 0 else 0.0
+        if self.use_curriculum:
+            self.intruder_speed = float(self.curriculum_intruder_speed)
+        else:
+            self.intruder_speed = float(self.rng.uniform(1.5, 4.0))
 
     # ── step ───────────────────────────────────────────────────────────────
     def step(self, actions: Dict[str, Any]):
@@ -245,13 +429,15 @@ class BorderEnv(ParallelEnv):
         self._step_physics(thrust)
         self._step_intruder()
         self._step_sensor(actions.get("sensor_0", 0))
+        self._update_local_estimates()
         self._comms_pipeline()
 
         effort = np.linalg.norm(thrust, axis=1) / (MASS_NOM * G)
         self.battery = np.clip(self.battery - 0.0005*effort, 0., 1.)
 
-        rewards  = self._compute_rewards(actions, prev_sensor_alert)
-        captured = self._captured()
+        captured, n_close, dists = self._capture_status()
+        coord_metrics = self._coordination_metrics(dists)
+        rewards  = self._compute_rewards(actions, prev_sensor_alert, captured, n_close, coord_metrics)
         trunc    = self.step_count >= MAX_STEPS
         done     = captured or trunc
         if done:
@@ -259,7 +445,7 @@ class BorderEnv(ParallelEnv):
 
         term  = {a: captured for a in self.possible_agents}
         trunc_ = {a: trunc   for a in self.possible_agents}
-        info  = self._info(captured)
+        info  = self._info(captured, n_close, coord_metrics)
         return self._obs_all(), rewards, term, trunc_, info
 
     # ── physics ────────────────────────────────────────────────────────────
@@ -295,11 +481,45 @@ class BorderEnv(ParallelEnv):
         self.wind_vec = np.clip(self.wind_vec, -6.0, 6.0)
 
     def _step_intruder(self):
+        # Intruder motion profiles: passive (toward center), evasive (move away
+        # from nearest drone when too close), reactive (evade and speed up).
         centre  = np.array([WORLD_XY/2, WORLD_XY/2, self.intruder_pos[2]])
         to_c    = centre - self.intruder_pos
-        bias    = to_c / (np.linalg.norm(to_c)+1e-8) * 0.6
+        base_bias = to_c / (np.linalg.norm(to_c)+1e-8) * 0.6
+
+        # default noise
         noise   = np.array([*self.rng.uniform(-1,1,2), self.rng.uniform(-0.2,0.2)]) * 0.4
-        d       = bias + noise
+
+        if self.intruder_profile == "passive":
+            d = base_bias + noise
+
+        else:
+            # find nearest drone
+            rels = self.drone_pos - self.intruder_pos
+            dists = np.linalg.norm(rels, axis=1)
+            nearest = int(np.argmin(dists))
+            nearest_dist = float(dists[nearest])
+            nearest_vec = rels[nearest]
+
+            if self.intruder_profile == "evasive":
+                # if a drone is within 6m, steer away strongly
+                if nearest_dist < 6.0:
+                    away = -nearest_vec / (np.linalg.norm(nearest_vec)+1e-8)
+                    d = 0.9 * away + 0.1 * base_bias + noise
+                else:
+                    d = base_bias + noise
+
+            elif self.intruder_profile == "reactive":
+                # reactive: accelerate away if any drone is within 8m
+                if nearest_dist < 8.0:
+                    away = -nearest_vec / (np.linalg.norm(nearest_vec)+1e-8)
+                    d = 0.7 * away + 0.3 * base_bias + noise
+                    self.intruder_speed = min(self.intruder_speed * 1.05, 6.0)
+                else:
+                    d = base_bias + noise
+            else:
+                d = base_bias + noise
+
         self.intruder_vel = d / (np.linalg.norm(d)+1e-8) * self.intruder_speed
         self.intruder_pos = np.clip(
             self.intruder_pos + self.intruder_vel*DT,
@@ -314,13 +534,54 @@ class BorderEnv(ParallelEnv):
         self.sensor_alert = int(
             np.linalg.norm(self._noisy_int_pos[:2] - sensor_loc[:2]) < 8.0)
 
+    # ── local estimates ────────────────────────────────────────────────────
+    def _update_local_estimates(self):
+        """Update each drone's local intruder estimate from FoV sensing.
+
+        Each drone independently checks whether the intruder is within its
+        field of view.  When detected, it stores a noisy absolute-position
+        and velocity estimate.  When not detected, it keeps the previous
+        (increasingly stale) estimate and increments the age counter.
+        """
+        for i in range(N_DRONES):
+            rel  = self.intruder_pos - self.drone_pos[i]
+            dist = float(np.linalg.norm(rel))
+            fwd  = self.drone_vel[i] / (np.linalg.norm(self.drone_vel[i]) + 1e-8)
+            cos_a = float(np.clip(np.dot(fwd, rel / (dist + 1e-8)), -1.0, 1.0))
+            angle = float(np.degrees(np.arccos(cos_a)))
+            detected = (dist < DETECT_RANGE) and (angle < DETECT_ANGLE)
+
+            if detected:
+                # Range-dependent sensor noise (closer = more accurate)
+                noise_std = 0.05 + 0.02 * dist
+                pos_noise = self.rng.normal(0, noise_std, 3)
+                vel_noise = self.rng.normal(0, noise_std * 0.5, 3)
+                self._local_estimates[i, :3] = (
+                    self.intruder_pos + pos_noise
+                ).astype(np.float32)
+                self._local_estimates[i, 3:] = (
+                    self.intruder_vel + vel_noise
+                ).astype(np.float32)
+                self._estimate_age[i] = 0
+            else:
+                self._estimate_age[i] += 1
+
     # ── comms ──────────────────────────────────────────────────────────────
     def _comms_pipeline(self):
-        honest = np.tile(
-            np.concatenate([self.intruder_pos, self.intruder_vel]),
-            (N_DRONES, 1)
-        ).astype(np.float32)
-        true_pos = self.intruder_pos.copy()
+        """Communication pipeline using LOCAL estimates (no ground truth).
+
+        Each drone broadcasts its own noisy local estimate of the intruder.
+        Drones with stale estimates (age >= STALE_THRESH) self-drop — they
+        have nothing useful to contribute.
+
+        Trust is evaluated against the RECEIVER's own local estimate when
+        available.  When the receiver has no fresh estimate, only drop-decay
+        is applied (no accuracy signal).
+
+        The compromised drone is an exception: the adversary is assumed to
+        have intelligence about the true intruder position and deliberately
+        sends misleading coordinates.
+        """
         base_drop = float(self.channel.p_drop)
 
         recv_msgs  = np.zeros((N_DRONES, N_DRONES, 6), np.float32)
@@ -330,28 +591,38 @@ class BorderEnv(ParallelEnv):
             for receiver in range(N_DRONES):
                 if receiver == sender:
                     continue
-                dist = float(np.linalg.norm(self.drone_pos[sender] - self.drone_pos[receiver]))
+
+                # Sender with stale estimate → self-imposed drop
+                if self._estimate_age[sender] >= STALE_THRESH:
+                    recv_msgs[receiver, sender]  = 0.0
+                    drop_masks[receiver, sender] = True
+                    continue
+
+                # Sender broadcasts its LOCAL noisy estimate (not GT)
+                msg = self._local_estimates[sender][np.newaxis, :]  # (1, 6)
+
+                dist = float(np.linalg.norm(
+                    self.drone_pos[sender] - self.drone_pos[receiver]))
                 effective_drop = min(0.95, base_drop + 0.025 * dist)
                 self.channel.set_drop_rate(effective_drop)
-                msg = honest[sender][np.newaxis, :]
                 recv, drops = self.channel.transmit(msg)
 
-                # Targeted adversary: compromised drone reports ADVERSARIAL position
-                # (mirror image of true intruder pos relative to the sender)
-                # This actively misleads receivers toward the wrong location.
+                # Targeted adversary: compromised drone reports ADVERSARIAL
+                # position.  The adversary has intelligence about the true
+                # intruder position (stronger threat model).
                 if (self.compromised_drone is not None
                         and sender == self.compromised_drone
                         and not drops[0]):
-                    fake_pos = 2.0 * self.drone_pos[sender][:3] - true_pos
+                    fake_pos = 2.0 * self.drone_pos[sender][:3] - self.intruder_pos
                     fake_pos = np.clip(fake_pos, [0,0,0],
                                        [WORLD_XY, WORLD_XY, MAX_ALT])
                     fake_vel = -self.intruder_vel
                     recv[0] = np.concatenate([fake_pos, fake_vel]).astype(np.float32)
 
-                recv_msgs[receiver, sender] = recv[0]
+                recv_msgs[receiver, sender]  = recv[0]
                 drop_masks[receiver, sender] = drops[0]
 
-        # Restore original configured drop rate after distance-aware transmission.
+        # Restore original configured drop rate.
         self.channel.set_drop_rate(base_drop)
 
         agg = np.zeros((N_DRONES, 6), np.float32)
@@ -360,8 +631,14 @@ class BorderEnv(ParallelEnv):
             msgs_i = recv_msgs[i][snd]
             drp_i  = drop_masks[i][snd]
             if self.use_trust:
-                scr_i  = self.trust_mods[i].get_trust_scores()
-                self.trust_mods[i].update(msgs_i[:,:3], true_pos, drp_i)
+                scr_i = self.trust_mods[i].get_trust_scores()
+                if self._estimate_age[i] < STALE_THRESH:
+                    # Receiver has a fresh local estimate → use as reference
+                    reference = self._local_estimates[i, :3].copy()
+                    self.trust_mods[i].update(msgs_i[:, :3], reference, drp_i)
+                else:
+                    # No local estimate → can only apply drop-decay
+                    self.trust_mods[i].decay_on_drops(drp_i)
             else:
                 # Systems A/B: uniform weights (no trust mechanism)
                 scr_i = np.ones(N_DRONES - 1, dtype=np.float64)
@@ -369,43 +646,86 @@ class BorderEnv(ParallelEnv):
         self._agg_msgs = agg
 
     # ── rewards ────────────────────────────────────────────────────────────
-    def _compute_rewards(self, actions, sensor_alert_for_reward: int) -> Dict[str, float]:
-        dists    = np.linalg.norm(self.drone_pos - self.intruder_pos, axis=1)
-        captured = self._captured()
+    def _compute_rewards(
+        self,
+        actions,
+        sensor_alert_for_reward: int,
+        captured: bool,
+        n_close: int,
+        coord_metrics: Dict[str, Any],
+    ) -> Dict[str, float]:
+        dists = coord_metrics.get("dists", np.linalg.norm(self.drone_pos - self.intruder_pos, axis=1))
         empirical_spoof = self.channel.get_stats()["empirical_spoof_rate"]
         # Proportional security penalty instead of binary cliff.
-        # This avoids drowning the pursuit reward when p_spoof is constant
-        # during training (e.g. p_spoof=0.1 always exceeds the old 0.05
-        # threshold, causing -5.0 every step and masking all other signals).
-        sec_penalty = min(1.0, empirical_spoof)  # scales 0→1 with spoof rate
-        # Min distance across team (encourages at least one drone to close in)
-        min_dist = dists.min()
+        sec_penalty = min(1.0, empirical_spoof)
+        mean_team_distance = float(coord_metrics.get("mean_team_distance", float(np.mean(dists))))
+        formation_spread = float(coord_metrics.get("formation_spread", 0.0))
+        angular_coverage_score = float(coord_metrics.get("angular_coverage_score", 0.0))
+        participation_count = int(coord_metrics.get("participation_count", int(np.sum(dists < 4.0))))
         rew: Dict[str, float] = {}
+        
+        # Reward shaping: trust-aware communication learning
+        # Goal: reward policy for learning to identify and trust honest senders
+        if self.use_trust and not captured:  # don't over-reward once task is complete
+            for i in range(N_DRONES):
+                trust_scores = self.trust_mods[i].get_trust_scores()  # (N_DRONES-1,)
+                if len(trust_scores) > 0:
+                    honest_idx = np.where(np.arange(N_DRONES) != i)
+                    # Reward: high trust on non-compromised drones
+                    if self.compromised_drone is not None:
+                        honest_scores = trust_scores[honest_idx[0] != self.compromised_drone] if self.compromised_drone != i else trust_scores[:self.compromised_drone] if self.compromised_drone > i else trust_scores[self.compromised_drone:]
+                        if len(honest_scores) > 0:
+                            honest_avg = float(np.mean(honest_scores))
+                            if honest_avg > 0.6:  # threshold for "good trust"
+                                # Small reward for learning to trust honest senders
+                                rew_shaping_trust = 0.1 * min(1.0, honest_avg - 0.6)
+                            else:
+                                rew_shaping_trust = -0.05  # penalty for low trust on honest senders
+                        else:
+                            rew_shaping_trust = 0.0
+                    else:
+                        # No compromised drone: reward high trust across board
+                        avg_trust = float(np.mean(trust_scores))
+                        rew_shaping_trust = 0.05 * min(1.0, avg_trust)  # small reward
+                    self._sender_trust_sum[i] += rew_shaping_trust
+        
+        team_approach = self._prev_mean_team_dist - mean_team_distance
+        shaping_weight = float(self.curriculum_shaping_weight if self.use_curriculum else 1.0)
+        capture_weight = float(self.curriculum_capture_weight if self.use_curriculum else 1.0)
+
         for i in range(N_DRONES):
             r  = -W2                                 # time penalty (-0.1/step)
             r -= W3 * (1.0 - self.battery[i])        # energy cost
             r -= W4 * sec_penalty                    # proportional security cost
 
-            # ── Distance shaping (continuous pursuit signal) ──
-            # Reward for getting closer vs previous step (Δdist)
-            approach = self._prev_dists[i] - dists[i]  # positive when closing in
-            r += 0.5 * approach
+            # Team pursuit: reward the whole formation for reducing average
+            # intruder distance, rather than incentivizing a single hero drone.
+            r += shaping_weight * W_TEAM * team_approach
 
-            # Proximity bonus (scales with closeness, not a cliff)
-            if dists[i] < CLOSE_R:
-                r += W1 * 0.1 * (1.0 - dists[i] / CLOSE_R)  # up to +1.0 at contact
+            # Formation geometry: keep the team in a useful spacing band.
+            r += shaping_weight * W_FORMATION * formation_spread
 
-            # Team coordination: bonus when min team distance is small
-            if min_dist < CLOSE_R:
-                r += 0.3 * (1.0 - min_dist / CLOSE_R)
+            # Angular coverage: reward surround-like approach patterns.
+            r += shaping_weight * W_COVERAGE * angular_coverage_score
 
-            # Capture
+            # Capture imminence: use n_close to bridge the gap to terminal success.
+            r += shaping_weight * W_CLOSE * (n_close / float(N_DRONES))
+
+            # Participation reward: keep all hunters engaged within a useful radius.
+            r += shaping_weight * W_PARTICIPATION * (participation_count / float(N_DRONES))
+
+            # Capture (dominates all shaping)
             if captured:
-                r += W1
+                r += capture_weight * W_CAPTURE
+            
+            # Add lightweight trust shaping (max 0.1 to avoid drowning main signal)
+            if self.use_trust and hasattr(self, '_sender_trust_sum'):
+                r += shaping_weight * 0.02 * np.tanh(self._sender_trust_sum[i])  # bounded by 0.02
 
             rew[f"drone_{i}"] = float(r)
 
         self._prev_dists = dists.copy()  # update for next step
+        self._prev_mean_team_dist = mean_team_distance
 
         # Collision penalty between hunter drones.
         for i in range(N_DRONES):
@@ -420,9 +740,66 @@ class BorderEnv(ParallelEnv):
                           0.05 if (not alert and action==0) else -0.5
         return rew
 
+    def _capture_status(self):
+        dists = np.linalg.norm(self.drone_pos - self.intruder_pos, axis=1)
+        within = dists < CAPTURE_R
+        n_close = int(np.sum(within))
+
+        if self.capture_mode == "team":
+            return n_close >= TEAM_CAPTURE_MIN_DRONES, n_close, dists
+
+        if self.capture_mode == "sustained":
+            if self._capture_counters is None:
+                self._capture_counters = np.zeros(N_DRONES, dtype=int)
+            for i in range(N_DRONES):
+                if within[i]:
+                    self._capture_counters[i] += 1
+                else:
+                    self._capture_counters[i] = 0
+            return bool(np.any(self._capture_counters >= self.sustained_steps)), n_close, dists
+
+        raise ValueError(f"Unknown capture_mode '{self.capture_mode}'")
+
     def _captured(self) -> bool:
-        return bool(np.any(
-            np.linalg.norm(self.drone_pos - self.intruder_pos, axis=1) < CAPTURE_R))
+        captured, _, _ = self._capture_status()
+        return captured
+
+    def _coordination_metrics(self, dists: np.ndarray) -> Dict[str, Any]:
+        mean_team_distance = float(np.mean(dists))
+        participation_count = int(np.sum(dists < 4.0))
+
+        pairwise = []
+        pair_scores = []
+        for i in range(N_DRONES):
+            for j in range(i + 1, N_DRONES):
+                dist_ij = float(np.linalg.norm(self.drone_pos[i] - self.drone_pos[j]))
+                pairwise.append(dist_ij)
+                if dist_ij < COLLISION_THRESHOLD:
+                    pair_scores.append(-1.0)
+                elif dist_ij > MAX_COORDINATION_DISTANCE:
+                    pair_scores.append(-0.5)
+                else:
+                    pair_scores.append(max(0.0, 1.0 - abs(dist_ij - IDEAL_SPACING) / 3.0))
+
+        formation_spread = float(np.mean(pair_scores)) if pair_scores else 0.0
+
+        rel = self.drone_pos[:, :2] - self.intruder_pos[:2]
+        angles = np.sort(np.arctan2(rel[:, 1], rel[:, 0]))
+        if len(angles) >= 2:
+            gaps = np.diff(np.r_[angles, angles[0] + 2.0 * np.pi])
+            ideal_gap = 2.0 * np.pi / float(len(angles))
+            angular_coverage = float(np.clip(1.0 - np.std(gaps) / max(ideal_gap, 1e-6), 0.0, 1.0))
+        else:
+            angular_coverage = 0.0
+
+        return {
+            "dists": dists,
+            "mean_team_distance": mean_team_distance,
+            "formation_spread": formation_spread,
+            "angular_coverage_score": angular_coverage,
+            "mean_pairwise_distance": float(np.mean(pairwise)) if pairwise else 0.0,
+            "participation_count": participation_count,
+        }
 
     # ── observations ───────────────────────────────────────────────────────
     def _obs_all(self):
@@ -437,10 +814,11 @@ class BorderEnv(ParallelEnv):
         fwd = self.drone_vel[i] / (np.linalg.norm(self.drone_vel[i]) + 1e-8)
         cos_a = float(np.clip(np.dot(fwd, rel / (dist + 1e-8)), -1.0, 1.0))
         angle = float(np.degrees(np.arccos(cos_a)))
-        detected = (dist < 8.0) and (angle < 60.0)
+        detected = (dist < DETECT_RANGE) and (angle < DETECT_ANGLE)
         intruder_rel = rel if detected else np.zeros(3, dtype=np.float64)
 
-        return np.concatenate([
+        # Base observation (20 dims)
+        obs_base = np.concatenate([
             self.drone_pos[i],                      # 3
             self.drone_vel[i],                      # 3
             self._agg_msgs[i],                      # 6
@@ -449,16 +827,59 @@ class BorderEnv(ParallelEnv):
             [self.battery[i]],                      # 1
             self.wind_vec,                          # 3
         ]).astype(np.float32)                       # = 20
+        
+        # Apply observation normalization
+        obs_base = self._normalize_obs_features(obs_base, i)
+        
+        # Append one-hot drone identity (3 dims) → total 23 dims
+        one_hot_id = np.zeros(N_DRONES, dtype=np.float32)
+        one_hot_id[i] = 1.0
 
-    def _info(self, captured):
+        rel_target_pos = (self.intruder_pos - self.drone_pos[i]).astype(np.float32)
+        rel_target_vel = (self.intruder_vel - self.drone_vel[i]).astype(np.float32)
+
+        teammate_rel_pos = []
+        teammate_rel_vel = []
+        for j in range(N_DRONES):
+            if j == i:
+                continue
+            teammate_rel_pos.append((self.drone_pos[j] - self.drone_pos[i]).astype(np.float32))
+            teammate_rel_vel.append((self.drone_vel[j] - self.drone_vel[i]).astype(np.float32))
+
+        teammate_rel_pos_arr = np.concatenate(teammate_rel_pos).astype(np.float32)
+        teammate_rel_vel_arr = np.concatenate(teammate_rel_vel).astype(np.float32)
+        dist_feature = np.array([dist], dtype=np.float32)
+
+        rel_features = np.concatenate([
+            rel_target_pos,
+            rel_target_vel,
+            teammate_rel_pos_arr,
+            teammate_rel_vel_arr,
+            dist_feature,
+        ]).astype(np.float32)
+
+        return np.concatenate([obs_base, one_hot_id, rel_features]).astype(np.float32)  # = 42
+
+    def _info(self, captured, n_close: int, coord_metrics: Dict[str, Any]):
         base = dict(
             captured=captured, step=self.step_count,
+            capture_count=int(captured),
+            capture_mode=self.capture_mode,
+            curriculum_stage=self.curriculum_stage,
+            intruder_speed=float(self.intruder_speed),
+            shaping_weight=float(self.curriculum_shaping_weight if self.use_curriculum else 1.0),
+            capture_weight=float(self.curriculum_capture_weight if self.use_curriculum else 1.0),
+            n_close=n_close,
+            participation_count=int(coord_metrics.get("participation_count", 0)),
+            mean_team_distance=float(coord_metrics.get("mean_team_distance", 0.0)),
+            formation_spread=float(coord_metrics.get("formation_spread", 0.0)),
+            angular_coverage_score=float(coord_metrics.get("angular_coverage_score", 0.0)),
+            mean_pairwise_distance=float(coord_metrics.get("mean_pairwise_distance", 0.0)),
             intruder_pos=self.intruder_pos.copy(),
             drone_pos=self.drone_pos.copy(),
             wind=self.wind_vec.copy(),
             drone_mass=self.drone_mass.copy(),
             sensor_noise_std=self.sensor_noise_std,
-            intruder_speed=self.intruder_speed,
             trust_scores=[tm.get_trust_scores().tolist() for tm in self.trust_mods],
         )
         return {a: base for a in self.possible_agents}

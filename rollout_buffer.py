@@ -21,6 +21,8 @@ class RolloutBuffer:
         n_drones: int = 3,
         obs_dim: int = 20,
         act_dim: int = 3,
+        policy_type: str = "mlp",
+        hidden_dim: int = 128,
         gamma: float = 0.99,
         lam: float = 0.95,
         device: str = "cpu",
@@ -29,6 +31,8 @@ class RolloutBuffer:
         self.n_drones = n_drones
         self.obs_dim = obs_dim
         self.act_dim = act_dim
+        self.policy_type = str(policy_type).lower()
+        self.hidden_dim = int(hidden_dim)
         self.gamma = gamma
         self.lam = lam
         self.device = device
@@ -40,6 +44,13 @@ class RolloutBuffer:
         self.values = np.zeros((n_steps, n_drones), dtype=np.float32)
         self.log_probs = np.zeros((n_steps, n_drones), dtype=np.float32)
         self.dones = np.zeros((n_steps, n_drones), dtype=bool)
+
+        self.hidden_states = None
+        self.cell_states = None
+        if self.policy_type in {"gru", "lstm"}:
+            self.hidden_states = np.zeros((n_steps, n_drones, self.hidden_dim), dtype=np.float32)
+        if self.policy_type == "lstm":
+            self.cell_states = np.zeros((n_steps, n_drones, self.hidden_dim), dtype=np.float32)
 
         self.advantages = np.zeros((n_steps, n_drones), dtype=np.float32)
         self.returns = np.zeros((n_steps, n_drones), dtype=np.float32)
@@ -53,6 +64,8 @@ class RolloutBuffer:
         values_dict: Dict[str, float],
         log_probs_dict: Dict[str, float],
         dones_dict: Dict[str, bool],
+        hidden_state_dict: Dict[str, np.ndarray] | None = None,
+        cell_state_dict: Dict[str, np.ndarray] | None = None,
     ) -> None:
         """Store one timestep using environment dict outputs."""
         assert 0 <= step < self.n_steps, f"Step {step} out of bounds [0, {self.n_steps})"
@@ -74,6 +87,11 @@ class RolloutBuffer:
         self.values[step] = val_arr
         self.log_probs[step] = lp_arr
         self.dones[step] = done_arr
+
+        if self.hidden_states is not None and hidden_state_dict is not None:
+            self.hidden_states[step] = np.stack([hidden_state_dict[k] for k in drone_keys]).astype(np.float32)
+        if self.cell_states is not None and cell_state_dict is not None:
+            self.cell_states[step] = np.stack([cell_state_dict[k] for k in drone_keys]).astype(np.float32)
 
         self.ptr = max(self.ptr, step + 1)
 
@@ -139,4 +157,8 @@ class RolloutBuffer:
         self.dones.fill(False)
         self.advantages.fill(0.0)
         self.returns.fill(0.0)
+        if self.hidden_states is not None:
+            self.hidden_states.fill(0.0)
+        if self.cell_states is not None:
+            self.cell_states.fill(0.0)
         self.ptr = 0

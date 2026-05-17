@@ -41,6 +41,8 @@ class MAPPOTrainer:
         "run_name": "system_A",
         "checkpoint_dir": "checkpoints",
         "seed": 0,
+        "policy_type": "mlp",
+        "hidden_dim": 128,
     }
 
     def __init__(self, env: BorderEnv, config: Optional[Dict[str, Any]] = None) -> None:
@@ -49,6 +51,13 @@ class MAPPOTrainer:
         if config is not None:
             self.config.update(config)
 
+        self.policy_type = str(self.config.get("policy_type", "mlp")).lower()
+        self.hidden_dim = int(self.config.get("hidden_dim", 128))
+        self.obs_dim = int(getattr(env, "drone_obs_dim", 23))
+        self.config["policy_type"] = self.policy_type
+        self.config["hidden_dim"] = self.hidden_dim
+        self.config["obs_dim"] = self.obs_dim
+
         self.seed = int(self.config["seed"])
         random.seed(self.seed)
         np.random.seed(self.seed)
@@ -56,8 +65,10 @@ class MAPPOTrainer:
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self.policy = PolicyNet(obs_dim=20, act_dim=3).to(self.device)
-        self.value = ValueNet(obs_dim=60).to(self.device)
+        # Policy receives the expanded per-drone observation.
+        # Value receives the concatenation of all drone observations.
+        self.policy = PolicyNet(obs_dim=self.obs_dim, act_dim=3, hidden_dim=self.hidden_dim, policy_type=self.policy_type).to(self.device)
+        self.value = ValueNet(obs_dim=self.obs_dim * 3).to(self.device)
 
         lr = float(self.config["lr"])
         self.policy_opt = torch.optim.Adam(self.policy.parameters(), lr=lr)
@@ -66,8 +77,10 @@ class MAPPOTrainer:
         self.buffer = RolloutBuffer(
             n_steps=int(self.config["n_steps"]),
             n_drones=3,
-            obs_dim=20,
+            obs_dim=self.obs_dim,
             act_dim=3,
+            policy_type=self.policy_type,
+            hidden_dim=self.hidden_dim,
             gamma=float(self.config["gamma"]),
             lam=float(self.config["lam"]),
             device=self.device,
@@ -75,15 +88,32 @@ class MAPPOTrainer:
 
         self.total_env_steps = 0
         self.best_eval_capture_rate = float("-inf")
+        
+        # Curriculum learning tracking
+        self.curriculum_progress = 0.0
+        self.total_training_steps = int(self.config.get("total_steps", 1_000_000))
 
     @staticmethod
     def _drone_keys() -> List[str]:
         return ["drone_0", "drone_1", "drone_2"]
 
-    def _obs_all_tensor(self, obs_dict: Dict[str, np.ndarray]) -> torch.Tensor:
+    def _init_policy_state(self):
+        if not self.policy.is_recurrent:
+            return None
+        device = self.device
+        if self.policy_type == "gru":
+            return {k: torch.zeros(self.hidden_dim, device=device) for k in self._drone_keys()}
+        return {k: (torch.zeros(self.hidden_dim, device=device), torch.zeros(self.hidden_dim, device=device)) for k in self._drone_keys()}
+
+    def _obs_all_tensor(self, obs_dict: Dict[str, np.ndarray], info_dict: Optional[Dict[str, Any]] = None) -> torch.Tensor:
+        """Concat all drone obs (now 23-dim with one-hot ID) into critic input.
+        
+        Critic receives: 23*3 = 69 dims (base)
+        Optional augmentation: trust scores + channel stats (can be added here if info provided).
+        """
         drone_obs = np.concatenate([obs_dict[k] for k in self._drone_keys()], axis=0).astype(np.float32)
-        obs_all = torch.as_tensor(drone_obs, dtype=torch.float32, device=self.device).unsqueeze(0)  # (1, 60)
-        assert obs_all.shape == (1, 60), f"Expected (1, 60), got {tuple(obs_all.shape)}"
+        obs_all = torch.as_tensor(drone_obs, dtype=torch.float32, device=self.device).unsqueeze(0)  # (1, 69)
+        assert obs_all.shape == (1, self.obs_dim * 3), f"Expected (1, {self.obs_dim * 3}), got {tuple(obs_all.shape)}"
         return obs_all
 
     @staticmethod
@@ -98,28 +128,68 @@ class MAPPOTrainer:
         return float(np.mean(flat)) if flat else 0.0
 
     def collect_rollout(self) -> Dict[str, float]:
-        """Collect one rollout and compute GAE-ready buffer targets."""
+        """Collect one rollout and compute GAE-ready buffer targets.
+        
+        Also updates curriculum progress based on training steps.
+        """
         self.buffer.reset()
         n_steps = int(self.config["n_steps"])
+        
+        # Update curriculum progress (0.0 to 1.0 based on total training steps)
+        progress = self.total_env_steps / max(1, self.total_training_steps)
+        if hasattr(self.env, 'update_curriculum_progress'):
+            self.env.update_curriculum_progress(progress)
+        self.curriculum_progress = progress
 
         obs, _ = self.env.reset(seed=self.seed + self.total_env_steps)
+        policy_state = self._init_policy_state()
 
         rollout_rewards: List[float] = []
         rollout_captures = 0
         rollout_episode_count = 0
         steps_to_capture: List[int] = []
         trust_values: List[float] = []
+        stage_values: List[str] = []
+        speed_values: List[float] = []
+        n_close_values: List[float] = []
+        participation_values: List[float] = []
+        team_distance_values: List[float] = []
+        formation_values: List[float] = []
+        coverage_values: List[float] = []
 
         for step in range(n_steps):
             actions_dict: Dict[str, np.ndarray] = {}
             log_probs_dict: Dict[str, float] = {}
             values_dict: Dict[str, float] = {}
+            hidden_state_dict: Optional[Dict[str, np.ndarray]] = None
+            cell_state_dict: Optional[Dict[str, np.ndarray]] = None
 
             with torch.no_grad():
-                for k in self._drone_keys():
-                    action, log_prob = self.policy.get_action(obs[k], deterministic=False)
-                    actions_dict[k] = action
-                    log_probs_dict[k] = float(log_prob)
+                if self.policy.is_recurrent:
+                    hidden_state_dict = {}
+                    if self.policy_type == "gru":
+                        for k in self._drone_keys():
+                            hidden_in = policy_state[k]
+                            hidden_state_dict[k] = hidden_in.detach().cpu().numpy().astype(np.float32)
+                            action, log_prob, next_hidden = self.policy.step(obs[k], deterministic=False, hidden_state=hidden_in)
+                            actions_dict[k] = action
+                            log_probs_dict[k] = float(log_prob)
+                            policy_state[k] = next_hidden.squeeze(0)
+                    else:
+                        cell_state_dict = {}
+                        for k in self._drone_keys():
+                            hidden_in = policy_state[k]
+                            hidden_state_dict[k] = hidden_in[0].detach().cpu().numpy().astype(np.float32)
+                            cell_state_dict[k] = hidden_in[1].detach().cpu().numpy().astype(np.float32)
+                            action, log_prob, next_hidden = self.policy.step(obs[k], deterministic=False, hidden_state=hidden_in)
+                            actions_dict[k] = action
+                            log_probs_dict[k] = float(log_prob)
+                            policy_state[k] = (next_hidden[0].squeeze(0), next_hidden[1].squeeze(0))
+                else:
+                    for k in self._drone_keys():
+                        action, log_prob = self.policy.get_action(obs[k], deterministic=False)
+                        actions_dict[k] = action
+                        log_probs_dict[k] = float(log_prob)
 
                 obs_all = self._obs_all_tensor(obs)
                 v = float(self.value(obs_all).squeeze(0).squeeze(0).cpu().item())
@@ -140,18 +210,28 @@ class MAPPOTrainer:
                 values_dict=values_dict,
                 log_probs_dict=log_probs_dict,
                 dones_dict=dones_dict,
+                hidden_state_dict=hidden_state_dict,
+                cell_state_dict=cell_state_dict,
             )
 
             rollout_rewards.append(float(np.mean([rewards[k] for k in self._drone_keys()])))
+            info0 = info_all.get("drone_0", {})
+            stage_values.append(str(info0.get("curriculum_stage", "")))
+            speed_values.append(float(info0.get("intruder_speed", 0.0)))
+            n_close_values.append(float(info0.get("n_close", 0)))
+            participation_values.append(float(info0.get("participation_count", 0)))
+            team_distance_values.append(float(info0.get("mean_team_distance", 0.0)))
+            formation_values.append(float(info0.get("formation_spread", 0.0)))
+            coverage_values.append(float(info0.get("angular_coverage_score", 0.0)))
 
             if any(dones_dict.values()):
                 rollout_episode_count += 1
-                info0 = info_all.get("drone_0", {})
                 trust_values.append(self._mean_trust_from_info(info0))
                 if bool(info0.get("captured", False)):
                     rollout_captures += 1
                     steps_to_capture.append(int(info0.get("step", 0)))
                 next_obs, _ = self.env.reset()
+                policy_state = self._init_policy_state()
 
             obs = next_obs
 
@@ -169,7 +249,15 @@ class MAPPOTrainer:
         return {
             "mean_reward": float(np.mean(rollout_rewards)) if rollout_rewards else 0.0,
             "capture_rate": capture_rate,
+            "capture_count": float(rollout_captures),
             "mean_trust": mean_trust,
+            "curriculum_stage": stage_values[-1] if stage_values else "",
+            "mean_intruder_speed": float(np.mean(speed_values)) if speed_values else 0.0,
+            "mean_n_close": float(np.mean(n_close_values)) if n_close_values else 0.0,
+            "mean_participation_count": float(np.mean(participation_values)) if participation_values else 0.0,
+            "mean_team_distance": float(np.mean(team_distance_values)) if team_distance_values else 0.0,
+            "mean_formation_spread": float(np.mean(formation_values)) if formation_values else 0.0,
+            "mean_angular_coverage": float(np.mean(coverage_values)) if coverage_values else 0.0,
             "steps_to_capture": mean_steps_to_capture,
         }
 
@@ -188,9 +276,15 @@ class MAPPOTrainer:
         approx_kls: List[float] = []
 
         total = self.buffer.ptr * self.buffer.n_drones
-        obs_all_t = self.buffer.obs[: self.buffer.ptr].reshape(self.buffer.ptr, -1)  # (T, 60)
-        obs_all_flat = np.repeat(obs_all_t, repeats=self.buffer.n_drones, axis=0)  # (T*3, 60)
+        obs_all_t = self.buffer.obs[: self.buffer.ptr].reshape(self.buffer.ptr, -1)
+        obs_all_flat = np.repeat(obs_all_t, repeats=self.buffer.n_drones, axis=0)
         flat_returns = self.buffer.returns[: self.buffer.ptr].reshape(total)
+        flat_hidden = None
+        flat_cell = None
+        if self.buffer.hidden_states is not None:
+            flat_hidden = self.buffer.hidden_states[: self.buffer.ptr].reshape(total, self.hidden_dim)
+        if self.buffer.cell_states is not None:
+            flat_cell = self.buffer.cell_states[: self.buffer.ptr].reshape(total, self.hidden_dim)
 
         for _ in range(n_epochs):
             idx = np.random.permutation(total)
@@ -203,26 +297,35 @@ class MAPPOTrainer:
                     self.buffer.obs[: self.buffer.ptr].reshape(total, self.buffer.obs_dim)[b],
                     dtype=torch.float32,
                     device=self.device,
-                )  # (batch, 20)
+                )
                 act_b = torch.as_tensor(
                     self.buffer.actions[: self.buffer.ptr].reshape(total, self.buffer.act_dim)[b],
                     dtype=torch.float32,
                     device=self.device,
-                )  # (batch, 3)
+                )
                 old_log_b = torch.as_tensor(
                     self.buffer.log_probs[: self.buffer.ptr].reshape(total)[b],
                     dtype=torch.float32,
                     device=self.device,
-                )  # (batch,)
+                )
                 adv_b = torch.as_tensor(
                     self.buffer.advantages[: self.buffer.ptr].reshape(total)[b],
                     dtype=torch.float32,
                     device=self.device,
-                )  # (batch,)
-                ret_b = torch.as_tensor(flat_returns[b], dtype=torch.float32, device=self.device)  # (batch,)
-                obs_all_b = torch.as_tensor(obs_all_flat[b], dtype=torch.float32, device=self.device)  # (batch, 60)
+                )
+                ret_b = torch.as_tensor(flat_returns[b], dtype=torch.float32, device=self.device)
+                obs_all_b = torch.as_tensor(obs_all_flat[b], dtype=torch.float32, device=self.device)
 
-                new_log_b, entropy_b = self.policy.evaluate_actions(obs_b, act_b)
+                if self.policy.is_recurrent and flat_hidden is not None:
+                    hidden_b = torch.as_tensor(flat_hidden[b], dtype=torch.float32, device=self.device)
+                    if self.policy_type == "lstm" and flat_cell is not None:
+                        cell_b = torch.as_tensor(flat_cell[b], dtype=torch.float32, device=self.device)
+                        hidden_input = (hidden_b, cell_b)
+                    else:
+                        hidden_input = hidden_b
+                    new_log_b, entropy_b = self.policy.evaluate_actions(obs_b, act_b, hidden_state=hidden_input)
+                else:
+                    new_log_b, entropy_b = self.policy.evaluate_actions(obs_b, act_b)
                 ratio = torch.exp(new_log_b - old_log_b)
                 surr1 = ratio * adv_b
                 surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_b
@@ -270,6 +373,9 @@ class MAPPOTrainer:
             p_drop=p_drop_eval,
             p_spoof=p_spoof_eval,
             use_trust=getattr(self.env, "use_trust", True),
+            capture_mode=getattr(self.env, "capture_mode", "team"),
+            sustained_steps=getattr(self.env, "sustained_steps", 3),
+            capture_k=getattr(self.env, "capture_k", 2),
             seed=self.seed,
         )
 
@@ -277,24 +383,54 @@ class MAPPOTrainer:
         ep_rewards: List[float] = []
         ep_steps: List[int] = []
         trust_values: List[float] = []
+        stage_values: List[str] = []
+        speed_values: List[float] = []
+        n_close_values: List[float] = []
+        participation_values: List[float] = []
+        team_distance_values: List[float] = []
+        formation_values: List[float] = []
+        coverage_values: List[float] = []
 
         for ep in range(n_episodes):
             obs, _ = eval_env.reset(seed=self.seed + ep)
             done = False
             ep_reward = 0.0
             steps = 0
+            policy_state = self._init_policy_state()
 
             while not done:
                 actions_env: Dict[str, Any] = {}
-                for k in self._drone_keys():
-                    a, _ = self.policy.get_action(obs[k], deterministic=True)
-                    actions_env[k] = a
+                if self.policy.is_recurrent:
+                    if self.policy_type == "gru":
+                        for k in self._drone_keys():
+                            hidden_in = policy_state[k]
+                            a, _, next_hidden = self.policy.step(obs[k], deterministic=True, hidden_state=hidden_in)
+                            actions_env[k] = a
+                            policy_state[k] = next_hidden.squeeze(0)
+                    else:
+                        for k in self._drone_keys():
+                            hidden_in = policy_state[k]
+                            a, _, next_hidden = self.policy.step(obs[k], deterministic=True, hidden_state=hidden_in)
+                            actions_env[k] = a
+                            policy_state[k] = (next_hidden[0].squeeze(0), next_hidden[1].squeeze(0))
+                else:
+                    for k in self._drone_keys():
+                        a, _ = self.policy.get_action(obs[k], deterministic=True)
+                        actions_env[k] = a
                 actions_env["sensor_0"] = 1 if float(obs["sensor_0"][0]) > 0.5 else 0
 
                 obs, rewards, term, trunc, info = eval_env.step(actions_env)
                 ep_reward += float(np.mean([rewards[k] for k in self._drone_keys()]))
                 steps += 1
                 done = any(term[k] or trunc[k] for k in self._drone_keys())
+                info0 = info.get("drone_0", {})
+                stage_values.append(str(info0.get("curriculum_stage", "")))
+                speed_values.append(float(info0.get("intruder_speed", 0.0)))
+                n_close_values.append(float(info0.get("n_close", 0)))
+                participation_values.append(float(info0.get("participation_count", 0)))
+                team_distance_values.append(float(info0.get("mean_team_distance", 0.0)))
+                formation_values.append(float(info0.get("formation_spread", 0.0)))
+                coverage_values.append(float(info0.get("angular_coverage_score", 0.0)))
 
             info0 = info.get("drone_0", {})
             captures += int(bool(info0.get("captured", False)))
@@ -306,9 +442,17 @@ class MAPPOTrainer:
 
         return {
             "capture_rate": float(captures / n_episodes),
+            "capture_count": float(captures),
             "mean_steps": float(np.mean(ep_steps)) if ep_steps else 0.0,
             "mean_reward": float(np.mean(ep_rewards)) if ep_rewards else 0.0,
             "mean_trust": float(np.mean(trust_values)) if trust_values else 0.0,
+            "curriculum_stage": stage_values[-1] if stage_values else "",
+            "mean_intruder_speed": float(np.mean(speed_values)) if speed_values else 0.0,
+            "mean_n_close": float(np.mean(n_close_values)) if n_close_values else 0.0,
+            "mean_participation_count": float(np.mean(participation_values)) if participation_values else 0.0,
+            "mean_team_distance": float(np.mean(team_distance_values)) if team_distance_values else 0.0,
+            "mean_formation_spread": float(np.mean(formation_values)) if formation_values else 0.0,
+            "mean_angular_coverage": float(np.mean(coverage_values)) if coverage_values else 0.0,
         }
 
     def save_checkpoint(self, step: int) -> None:
@@ -365,7 +509,7 @@ class MAPPOTrainer:
         wandb = None
         if use_wandb:
             try:
-                import wandb as _wandb
+                import wandb as _wandb  # type: ignore[import-not-found]
 
                 wandb = _wandb
                 wandb.init(
@@ -390,6 +534,14 @@ class MAPPOTrainer:
             metrics = {
                 "train/reward": rollout_stats["mean_reward"],
                 "train/capture_rate": rollout_stats["capture_rate"],
+                "train/capture_count": rollout_stats["capture_count"],
+                "train/curriculum_stage": rollout_stats["curriculum_stage"],
+                "train/intruder_speed": rollout_stats["mean_intruder_speed"],
+                "train/n_close_mean": rollout_stats["mean_n_close"],
+                "train/participation_mean": rollout_stats["mean_participation_count"],
+                "train/team_distance_mean": rollout_stats["mean_team_distance"],
+                "train/formation_spread_mean": rollout_stats["mean_formation_spread"],
+                "train/angular_coverage_mean": rollout_stats["mean_angular_coverage"],
                 "train/policy_loss": loss_stats["policy_loss"],
                 "train/value_loss": loss_stats["value_loss"],
                 "train/entropy": loss_stats["entropy"],
@@ -408,9 +560,17 @@ class MAPPOTrainer:
                 metrics.update(
                     {
                         "eval/capture_rate": eval_stats["capture_rate"],
+                        "eval/capture_count": eval_stats["capture_count"],
+                        "eval/curriculum_stage": eval_stats["curriculum_stage"],
+                        "eval/intruder_speed": eval_stats["mean_intruder_speed"],
                         "eval/mean_steps": eval_stats["mean_steps"],
                         "eval/mean_reward": eval_stats["mean_reward"],
                         "eval/mean_trust": eval_stats["mean_trust"],
+                        "eval/n_close_mean": eval_stats["mean_n_close"],
+                        "eval/participation_mean": eval_stats["mean_participation_count"],
+                        "eval/team_distance_mean": eval_stats["mean_team_distance"],
+                        "eval/formation_spread_mean": eval_stats["mean_formation_spread"],
+                        "eval/angular_coverage_mean": eval_stats["mean_angular_coverage"],
                     }
                 )
                 if eval_stats["capture_rate"] >= self.best_eval_capture_rate:
@@ -422,8 +582,15 @@ class MAPPOTrainer:
 
             print(
                 f"[Step {self.total_env_steps:>8,}] "
+                f"Stage={rollout_stats['curriculum_stage']:<7} | "
+                f"Speed={rollout_stats['mean_intruder_speed']:4.2f} | "
                 f"Capture={rollout_stats['capture_rate']*100:5.1f}% | "
                 f"Reward={rollout_stats['mean_reward']:7.2f} | "
+                f"Close={rollout_stats['mean_n_close']:4.2f} | "
+                f"Part={rollout_stats['mean_participation_count']:4.2f} | "
+                f"TeamDist={rollout_stats['mean_team_distance']:5.2f} | "
+                f"Form={rollout_stats['mean_formation_spread']:5.2f} | "
+                f"Cov={rollout_stats['mean_angular_coverage']:5.2f} | "
                 f"PolicyLoss={loss_stats['policy_loss']:8.4f} | "
                 f"ValueLoss={loss_stats['value_loss']:8.4f}"
             )

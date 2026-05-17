@@ -211,25 +211,42 @@ def plot_normalized_reward(df: pd.DataFrame, out_path: Path) -> None:
 
 
 def plot_trust_dynamics(out_path: Path) -> None:
-    """Generate a canonical trust dynamic illustration over one episode."""
-    steps = np.arange(0, 501)
-    honest = 0.75 + 0.22 * (1 - np.exp(-steps / 70.0))
-    spoofer = 0.95 * np.exp(-steps / 120.0)
-    
-    plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(steps, honest, label="drone_1 (honest)", color="#1f77b4", linewidth=2.5)
-    plt.plot(steps, spoofer, label="drone_2 (spoofer)", color="#d62728", linewidth=2.5)
-    plt.axhline(0.3, color="black", linestyle="--", linewidth=1.2, label="trust=0.3")
+    """Plot real trust trajectories if available, otherwise fall back to synthetic."""
+    traj_dir = Path("results") / "trust_trajs"
+    example_file = None
+    if traj_dir.exists():
+        files = list(traj_dir.glob("trust_C_*.npz"))  # prefer System C
+        if not files:
+            files = list(traj_dir.glob("trust_*.npz"))
+        if files:
+            example_file = files[0]
 
-    below = np.where(spoofer < 0.3)[0]
-    if len(below) > 0:
-        t = int(below[0])
-        plt.annotate(
-            f"drops below 0.3 at step {t}",
-            xy=(t, spoofer[t]),
-            xytext=(t + 40, 0.45),
-            arrowprops={"arrowstyle": "->", "lw": 1.2},
-        )
+    plt.figure(figsize=(10, 6), dpi=300)
+    if example_file is None:
+        # fallback synthetic
+        steps = np.arange(0, 501)
+        honest = 0.75 + 0.22 * (1 - np.exp(-steps / 70.0))
+        spoofer = 0.95 * np.exp(-steps / 120.0)
+        plt.plot(steps, honest, label="drone_1 (honest)", color="#1f77b4", linewidth=2.5)
+        plt.plot(steps, spoofer, label="drone_2 (spoofer)", color="#d62728", linewidth=2.5)
+        plt.axhline(0.3, color="black", linestyle="--", linewidth=1.2, label="trust=0.3")
+    else:
+        data = np.load(example_file, allow_pickle=True)
+        episodes = data["episodes"]
+        # select first episode and compute mean trust per step across receivers
+        if len(episodes) == 0:
+            return
+        ep = episodes[0]
+        # ep: list of steps; each step is list of receiver lists
+        steps = np.arange(len(ep))
+        mean_trust = []
+        for s in ep:
+            # s is list of lists (trust per receiver)
+            flat = []
+            for r in s:
+                flat.extend([float(x) for x in r])
+            mean_trust.append(float(np.mean(flat)) if flat else 0.0)
+        plt.plot(steps, mean_trust, label=f"mean_trust ({example_file.name})", color="#1b9e77", linewidth=2.5)
 
     plt.xlabel("step")
     plt.ylabel("trust score")
