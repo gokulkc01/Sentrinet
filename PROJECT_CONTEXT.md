@@ -1,247 +1,70 @@
-# SentryNet — Project Context
+# SentryNet — Project Context (updated May 18, 2026)
 
-## Summary of Understanding
+This file gives a concise, current summary of the codebase, experimental systems, recent results, and known limitations. Use it as the canonical reference for collaborators and reviewers.
 
-SentryNet is a trust-aware multi-agent reinforcement learning system for autonomous drone border surveillance. It studies whether lightweight EMA-based trust scoring can improve cooperative drone swarm robustness under adversarial communication attacks — without requiring cryptographic mechanisms.
+**High-level summary**
+- SentryNet is a modular research prototype that studies trust-aware multi-agent RL for cooperative drone pursuit under adversarial communication. The codebase contains training (MAPPO), evaluation sweeps, visualization (Pygame + PyBullet), and analysis tooling.
+- Recent work migrated the pipeline to use per-agent noisy local estimates (obs_dim=42) and added a curriculum and trust-consensus mechanisms to remove earlier ground-truth leakage.
 
-The project is positioned between a research prototype and a publishable experimental system. It has functional training, evaluation, and visualization pipelines, but carries several known scientific validity issues that must be resolved before results can withstand peer review.
+**Key components**
+- Environment: `border_env.py` (mock physics + optional PyBullet) with communication channel and trust pipeline.
+- Adversary: `adversarial_channel.py` implements distance-dependent drops and probabilistic spoofing.
+- Trust: `trust_module.py` (EMA + consensus heuristics) and `trust_aggregator.py`.
+- Learning: `networks.py`, `rollout_buffer.py`, `mappo_trainer.py`, and `train.py`.
+- Evaluation & analysis: `run_trained.py`, `evaluate.py`, `scripts/inspect_ckpt.py`, `scripts/plot_eval_results.py`, `scripts/plot_full_experiment.py`.
+- Visualization: `dashboard.py`, `simulation_trial.py`, PyBullet optional overlay.
 
----
+**Experimental systems (short)**
+- System A — clean baseline (no drops/no spoofing) during training.
+- System B — trained with packet loss (p_drop > 0) but no spoofing.
+- System C — trust-aware (uses trust aggregation + training with p_spoof > 0).
 
-## Architecture — What Exists Today
+Each system has multi-seed checkpoints (seeds 0/1/2). Checkpoints are stored in `checkpoints/` with `step_*.pt` artifacts.
 
-### Agents
+Recent results and artifacts
+- Aggregated sweep: `results/full_experiment.csv` (per-system, per-seed, multiple drop rates). Rows contain capture_rate, mean_steps, mean_reward, mean_trust, and `p_spoof`.
+- Generated plots (saved to `results/plots/`):
+  - `capture_vs_drop.png` — capture rate vs drop rate (mean ± std over seeds/conditions)
+  - `steps_vs_drop.png` — mean episode length vs drop rate
+  - `reward_vs_drop.png` — mean reward vs drop rate
+  - `trust_vs_drop.png` — mean trust vs drop rate
+  - `capture_rates_systems.png` — deterministic eval capture rates (per-checkpoint files)
+- Utility scripts added/updated: `scripts/inspect_ckpt.py`, `scripts/plot_eval_results.py`, `scripts/plot_full_experiment.py` (these produce the above CSV/PNG artifacts).
 
-| Agent | Type | Observation | Action |
-|-------|------|-------------|--------|
-| `drone_0`, `drone_1`, `drone_2` | Hunter drones (MAPPO) | 20-dim float32 | Box(3) ∈ [-1,1] (thrust) |
-| `sensor_0` | Ground sensor (rule-based) | 4-dim float32 | Discrete(2) (idle/trigger) |
-| Intruder | Autonomous (biased random walk) | N/A | N/A |
+Representative single-checkpoint deterministic evals (seed=1, 300 eps, headless):
+- System A (seed1): ~88.0% capture
+- System B (seed1): ~90.7% capture
+- System C (seed1): ~77.3% capture
 
-### World
+Interpretation note: single-seed deterministic runs can differ substantially from the aggregated CSV (which is multi-seed and uses different evaluation settings). Always prefer aggregated CSV analyses for conclusions.
 
-- 20×20×10m airspace
-- Mock physics with Ornstein-Uhlenbeck wind turbulence
-- Optional PyBullet physics and 3D rendering
-- Domain randomization: mass ±18%, wind up to 15 km/h, sensor noise 0–0.30, intruder speed 1.5–4.0 m/s
+Known issues & limitations
+- Seed variance: performance shows high variance across seeds — run 5+ seeds for robust claims.
+- PyBullet stability: long multi-episode visual runs occasionally trigger `pybullet.error: Not connected to physics server` — dashboard needs graceful reconnect/fallback.
+- Trust realism migration: Step 1–3 (local estimates, no-GT broadcasts, consensus updates) completed; retraining across seeds with the realistic pipeline (full evaluation) is pending.
+- Some plots previously used synthetic traces; real per-step trust trajectories must be recorded for publication-quality figures.
 
-### Communication Pipeline (Per Step)
-
+Running and reproducing important outputs
+- Regenerate the publication plots (reads `results/full_experiment.csv`):
+```powershell
+.\sentrinet_env\Scripts\Activate.ps1
+python scripts\plot_full_experiment.py
 ```
-1. Each drone broadcasts honest = [intruder_pos, intruder_vel]  ← GROUND TRUTH
-2. Compromised drone (if set) replaces message with adversarial mirror-image position
-3. AdversarialChannel applies:
-   a. Distance-dependent drop (base p_drop + 0.025 × distance, capped at 0.95)
-   b. Bernoulli packet drop
-   c. Additive Gaussian spoofing (p_spoof probability)
-4. TrustModule updates EMA trust per sender:
-   - On receive: tau = 0.1 × accuracy + 0.9 × tau
-   - accuracy = max(0, 1 - ||recv_pos - TRUE_pos|| / 5.0)  ← GROUND TRUTH
-   - On drop: tau = 0.95 × tau
-5. TrustAggregator: weighted_avg = Σ(tau_j × msg_j) / Σ(tau_j)
-6. Aggregated message → observation dims [6:12]
+- Re-parse single-checkpoint eval files (robust decoding) and regenerate `capture_rates_systems.png`:
+```powershell
+.\sentrinet_env\Scripts\Activate.ps1
+python scripts\plot_eval_results.py
+```
+- Inspect a checkpoint:
+```powershell
+.\sentrinet_env\Scripts\Activate.ps1
+python scripts\inspect_ckpt.py checkpoints\system_C_gru_seed1\step_1001472.pt
 ```
 
-### Observation Layout (20-dim per drone)
+Next recommended actions (short)
+1. Aggregate results across seeds (run missing seed evaluations or re-run `validation_harness.py` with 5 seeds).
+2. Retrain or fine-tune weak seeds (seed 1 for System C showed lower capture in some runs).
+3. Instrument evaluation to log per-step trust for real trust-dynamics plots.
+4. Harden the dashboard PyBullet loop to recover from disconnects.
 
-| Dims | Content |
-|------|---------|
-| [0:3] | Own position |
-| [3:6] | Own velocity |
-| [6:9] | Trust-aggregated intruder position |
-| [9:12] | Trust-aggregated intruder velocity |
-| [12] | Sensor alert flag |
-| [13:16] | Relative intruder position (if in FoV, else zeros) |
-| [16] | Battery |
-| [17:20] | Wind vector |
-
-### Field of View Sensing
-
-Each drone has independent local sensing:
-- Detection range: 8.0m
-- Detection cone: 60° half-angle (relative to velocity direction)
-- When detected: stores noisy local estimate (noise_std = 0.05 + 0.02 × distance)
-- When not detected: previous estimate ages but persists
-
-**Key finding**: Local estimates (`_local_estimates`, `_estimate_age`) exist in the environment but are **not yet used** in the communication pipeline. The `_comms_pipeline()` still broadcasts ground-truth intruder state.
-
-### Neural Networks
-
-| Network | Input | Hidden | Output | Init |
-|---------|-------|--------|--------|------|
-| PolicyNet (shared actor) | 20-dim | 128→Tanh→128→Tanh | 3-dim Gaussian (tanh-squashed) | Orthogonal |
-| ValueNet (centralized critic) | 60-dim (3×20 concatenated) | 128→Tanh→128→Tanh | 1-dim scalar | Orthogonal |
-
-### Training (MAPPO)
-
-- PPO clip ratio: 0.2
-- GAE: γ=0.99, λ=0.95
-- Rollout: 2048 steps
-- Mini-batch: 256
-- Epochs per update: 4
-- Learning rate: 3e-4 (Adam)
-- Entropy coefficient: 0.01
-- Gradient clipping: 10.0
-- Total steps: 1,000,000 per run
-
-### Reward Structure
-
-| Component | Weight | Notes |
-|-----------|--------|-------|
-| Capture bonus | +W1 = +10.0 | On successful capture |
-| Time penalty | -W2 = -0.1 | Per step |
-| Energy cost | -W3 × (1 - battery) | Per step |
-| Security penalty | -W4 × min(1, emp_spoof_rate) | Proportional, W4=5.0 |
-| Approach shaping | +0.5 × Δdist | Closing distance reward |
-| Proximity bonus | +1.0 × (1 - dist/5.0) | When within 5.0m |
-| Team coordination | +0.3 × (1 - min_dist/5.0) | When team closest drone < 5.0m |
-| Collision penalty | -5.0 | When drones < 1.5m apart |
-| Sensor | +1.0 correct trigger, +0.05 correct idle, -0.5 false alarm | |
-
-### Capture Logic
-
-Single-drone proximity: any drone within CAPTURE_R = 2.0m triggers capture.
-
-### Three Experimental Systems
-
-| System | p_drop (train) | p_spoof (train) | use_trust | Purpose |
-|--------|----------------|-----------------|-----------|---------|
-| A | 0.0 | 0.0 | False | Clean baseline |
-| B | 0.2 | 0.0 | False | Packet loss only |
-| C | 0.2 | 0.1 | True | Trust-aware (full) |
-
-All evaluated under identical adversarial conditions: p_spoof=0.1, compromised_drone=1, sweep p_drop ∈ {0.0, 0.1, …, 0.8}.
-
----
-
-## Existing Infrastructure
-
-### Files
-
-| File | Purpose |
-|------|---------|
-| `border_env.py` | Environment (588 lines) — world, physics, comms, rewards |
-| `adversarial_channel.py` | Packet drop + spoofing simulation |
-| `trust_module.py` | EMA trust scoring per sender |
-| `trust_aggregator.py` | Trust-weighted message averaging |
-| `networks.py` | PolicyNet + ValueNet |
-| `rollout_buffer.py` | Rollout storage + GAE computation |
-| `mappo_trainer.py` | Full MAPPO training loop |
-| `train.py` | CLI for training systems A/B/C |
-| `evaluate.py` | Full condition sweep → CSV |
-| `plot_results.py` | Publication plots from CSV |
-| `run_trained.py` | Inference + PyBullet visualization |
-| `simulation_trial.py` | Cleaner PyBullet visualizer |
-| `dashboard.py` | Real-time Pygame + optional PyBullet dashboard |
-| `diagnose_trust.py` | Trust mechanism + checkpoint health tests |
-| `verify_step1.py` | Verification of local estimate infrastructure |
-| `diagnostic_3d.py` | Environment sanity checks |
-| `tests/test_phase1_3d.py` | Pytest suite for Phase 1 |
-
-### Checkpoints
-
-Trained models exist for all 3 systems × 3 seeds (0, 1, 2), plus an extra `system_A_seed42`. Each run directory contains `best.pt` and/or `step_*.pt` files.
-
-### Results
-
-`results/full_experiment.csv`: 81 rows (3 systems × 3 seeds × 9 drop rates), 200 episodes per condition.
-
-5 publication plots in `results/plots/`.
-
----
-
-## Scientific Validity Assessment
-
-### Critical Issues (in priority order)
-
-#### Issue 1: Ground-Truth Leakage in Trust
-
-**Where**: `border_env.py:404`, `trust_module.py:94`
-
-The trust update compares received messages against the **true intruder position** passed directly from the environment. This means trust evaluation has access to information no real drone would possess.
-
-**Impact**: Trust scores are artificially accurate. The entire System C claim — that trust-aware aggregation improves robustness — is built on privileged information. A reviewer would reject this immediately.
-
-**What exists already**: Local FoV-based estimates (`_local_estimates`, `_estimate_age`) are computed per step in `_update_local_estimates()`, but the communication pipeline (`_comms_pipeline()`) ignores them and broadcasts ground truth.
-
-#### Issue 2: Global Broadcasts Use Privileged Information
-
-**Where**: `border_env.py:359-362`
-
-The "honest" messages broadcast by each drone are `[intruder_pos, intruder_vel]` — the true state from the environment. In reality, each drone would only know its own noisy local estimate.
-
-**Impact**: The entire communication subsystem is operating on perfect information. This makes the adversarial communication challenge far easier than it would be in practice.
-
-#### Issue 3: Single-Drone Capture is Trivial
-
-**Where**: `border_env.py:463-465`
-
-Only one drone needs to reach within 2.0m to capture. This is too easy and doesn't require real coordination.
-
-#### Issue 4: Intruder is Non-Reactive
-
-**Where**: `border_env.py:305-315`
-
-The intruder follows a biased random walk toward the center with random noise. It doesn't evade, doesn't react to hunters, and doesn't adapt. This makes the pursuit problem significantly easier than any realistic scenario.
-
-#### Issue 5: No Curriculum Training
-
-All three systems train under fixed adversarial settings. System C sees the same p_drop=0.2 and p_spoof=0.1 for the entire training run. There is no progressive difficulty escalation.
-
-#### Issue 6: Trust Dynamics Plot is Synthetic
-
-**Where**: `plot_results.py:213-243`
-
-The trust dynamics plot (`plot3_trust_dynamics.png`) is generated from a hardcoded exponential decay formula, not from actual trust trajectories recorded during evaluation. This is misleading for publication.
-
-#### Issue 7: High Variance Across Seeds
-
-The CSV data shows significant performance variance. For example, System C seed 1 degrades to 59.5% capture at p_drop=0.8, while seed 0 maintains 100% across all drop rates. With only 3 seeds, confidence intervals are wide.
-
-#### Issue 8: Sensor Agent is Rule-Based
-
-`sensor_0` is controlled by a simple threshold rule (`action = 1 if alert else 0`) everywhere — in training, evaluation, and inference. It never learns. Its reward signal exists but is not connected to any learning loop.
-
----
-
-## What Has Already Been Done (Prior Conversations)
-
-Based on conversation history:
-
-1. **Local estimate infrastructure** has been added (`_update_local_estimates()`, `_local_estimates`, `_estimate_age`, FoV detection) — Step 1 of the trust realism migration is complete.
-2. `verify_step1.py` confirms the infrastructure works without breaking existing behavior.
-3. Experiments have been run, results collected, plots generated.
-4. Dashboard and visualization tooling is mature.
-5. The system has been through debugging cycles (trust convergence issues, reward structure adjustments, spoofing strategy changes).
-
----
-
-## What the Codebase Actually Does Well
-
-1. **Clean separation of concerns**: env / channel / trust / learning / evaluation are modular.
-2. **Reproducibility**: Seeded RNG, checkpoint save/load, deterministic evaluation.
-3. **Visualization**: PyBullet 3D rendering, Pygame dashboard with live controls.
-4. **Domain randomization**: Non-trivial physics realism (mass variation, wind turbulence, distance-dependent drops).
-5. **Adversarial modeling**: Compromised drone sends mirror-image positions — a reasonably sophisticated targeted attack.
-6. **Evaluation methodology**: Systematic sweep across conditions with CSV export.
-
----
-
-## Relationship Between Components
-
-```
-train.py
-  └─ MAPPOTrainer
-       ├─ PolicyNet (shared)
-       ├─ ValueNet (centralized)
-       ├─ RolloutBuffer (GAE)
-       └─ BorderEnv
-            ├─ _MockPhysics / PyBullet
-            ├─ _update_local_estimates()  ← exists but unused in pipeline
-            ├─ _comms_pipeline()
-            │    ├─ AdversarialChannel.transmit()
-            │    ├─ TrustModule.update()  ← uses TRUE intruder pos
-            │    └─ TrustAggregator.aggregate()
-            ├─ _compute_rewards()
-            └─ _drone_obs()
-```
+If you need a one-line status for a README or PR, use: "Project ready for targeted retraining and statistical aggregation; plotting and analysis scripts produce multi-condition figures in `results/plots/`."

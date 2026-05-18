@@ -68,6 +68,8 @@ def train_configuration(
         use_curriculum=config_params["use_curriculum"],
         curriculum_progress=0.0,
         use_trust=config_params["use_trust"],
+        capture_mode="sustained",
+        sustained_steps=1,
         seed=seed,
     )
     

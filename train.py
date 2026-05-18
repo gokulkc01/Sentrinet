@@ -91,6 +91,7 @@ def train_one(
     capture_k: int = 2,
     policy_type: str = "mlp",
     hidden_dim: int = 128,
+    entropy_coef: float = 0.01,
     run_name: str | None = None,
 ) -> None:
     """Train one (system, seed) configuration."""
@@ -112,7 +113,7 @@ def train_one(
         "lam": 0.95,
         "clip_eps": 0.2,
         "value_coef": 0.5,
-        "entropy_coef": 0.01,
+        "entropy_coef": float(entropy_coef),
         "max_grad_norm": 10.0,
         "n_steps": 2048,
         "batch_size": 256,
@@ -126,6 +127,8 @@ def train_one(
         "seed": int(seed),
         "policy_type": str(policy_type),
         "hidden_dim": int(hidden_dim),
+        "capture_mode": str(capture_mode),
+        "sustained_steps": int(sustained_steps) if sustained_steps is not None else None,
     }
 
     print(f"\n=== Training {run_name} for {total_steps:,} steps ===")
@@ -140,13 +143,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--system", choices=["A", "B", "C", "all"], default="all")
     parser.add_argument("--curriculum", action="store_true", help="Enable curriculum learning for the run")
     parser.add_argument("--no-trust-shaping", action="store_true", help="Disable trust-aware reward shaping")
-    parser.add_argument("--capture-mode", choices=["team", "sustained"], default="team",
+    parser.add_argument("--capture-mode", choices=["team", "sustained"], default=None,
                         help="Capture rule used by the environment")
     parser.add_argument("--sustained-steps", type=int, default=None,
                         help="Required consecutive in-range steps for sustained capture")
     parser.add_argument("--capture-k", type=int, default=2,
                         help="Number of drones required for multi-capture mode")
-    parser.add_argument("--policy-type", choices=["mlp", "gru", "lstm"], default="mlp",
+    parser.add_argument("--policy-type", choices=["mlp", "gru", "lstm"], default=None,
                         help="Policy architecture used by MAPPO")
     parser.add_argument("--hidden-dim", type=int, default=128,
                         help="Hidden size for recurrent policy variants")
@@ -169,6 +172,25 @@ def main() -> None:
     use_curriculum = bool(args.curriculum)
     use_trust_shaping = not bool(args.no_trust_shaping)
 
+    policy_type = args.policy_type
+    capture_mode = args.capture_mode
+    sustained_steps = args.sustained_steps
+
+    if args.system == "C":
+        if policy_type is None:
+            policy_type = "gru"
+        if capture_mode is None:
+            capture_mode = "sustained"
+        if sustained_steps is None:
+            sustained_steps = 1
+    else:
+        if policy_type is None:
+            policy_type = "mlp"
+        if capture_mode is None:
+            capture_mode = "team"
+
+    entropy_coef = 0.005 if args.system == "C" and policy_type in {"gru", "lstm"} else 0.01
+
     systems: List[str] = ["A", "B", "C"] if args.system == "all" else [args.system]
     if args.seeds is not None:
         seeds: List[int] = [int(s) for s in args.seeds]
@@ -186,11 +208,12 @@ def main() -> None:
                 use_wandb=use_wandb,
                 use_curriculum=use_curriculum,
                 use_trust_shaping=use_trust_shaping,
-                capture_mode=args.capture_mode,
-                sustained_steps=args.sustained_steps,
+                capture_mode=capture_mode,
+                sustained_steps=sustained_steps,
                 capture_k=args.capture_k,
-                policy_type=args.policy_type,
+                policy_type=policy_type,
                 hidden_dim=args.hidden_dim,
+                entropy_coef=entropy_coef,
                 run_name=args.run_name,
             )
 

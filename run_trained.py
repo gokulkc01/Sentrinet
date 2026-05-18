@@ -27,13 +27,24 @@ N_DRONES = 3
 
 
 LEGACY_POLICY_KEY_MAP = {
-    "fc1.weight": "net.0.weight",
-    "fc1.bias": "net.0.bias",
-    "fc2.weight": "net.2.weight",
-    "fc2.bias": "net.2.bias",
+    "fc1.weight": "obs_encoder.0.weight",
+    "fc1.bias": "obs_encoder.0.bias",
+    "fc2.weight": "core.0.weight",
+    "fc2.bias": "core.0.bias",
     "fc_mean.weight": "mean_head.weight",
     "fc_mean.bias": "mean_head.bias",
+    "net.0.weight": "obs_encoder.0.weight",
+    "net.0.bias": "obs_encoder.0.bias",
+    "net.2.weight": "core.0.weight",
+    "net.2.bias": "core.0.bias",
 }
+
+
+def remap_policy_state_dict(state_dict):
+    """Translate legacy checkpoint keys into the current PolicyNet layout."""
+    if any(k.startswith("obs_encoder.") or k.startswith("core.") for k in state_dict):
+        return state_dict
+    return {LEGACY_POLICY_KEY_MAP.get(key, key): value for key, value in state_dict.items()}
 
 
 def infer_policy_obs_dim(state_dict) -> int:
@@ -104,12 +115,7 @@ def load_policy(checkpoint_path: str, device: str = "cpu") -> PolicyNet:
     ckpt = torch.load(checkpoint_path, map_location=device)
     config = ckpt.get("config", {}) if isinstance(ckpt.get("config", {}), dict) else {}
 
-    state_dict = ckpt["policy_state_dict"]
-    if not any(key in state_dict for key in LEGACY_POLICY_KEY_MAP.values()):
-        remapped_state_dict = {
-            LEGACY_POLICY_KEY_MAP.get(key, key): value for key, value in state_dict.items()
-        }
-        state_dict = remapped_state_dict
+    state_dict = remap_policy_state_dict(ckpt["policy_state_dict"])
 
     policy_type = str(config.get("policy_type", "mlp")).lower()
     obs_dim = int(config.get("obs_dim", infer_policy_obs_dim(state_dict)))
@@ -164,6 +170,7 @@ def run_stats(policy, args):
         sustained_steps=args.sustained_steps,
         capture_k=args.capture_k,
         seed=args.seed,
+        compromised_drone=args.compromised_drone,
     )
 
     captures = 0
@@ -261,6 +268,7 @@ def run_visual(policy, args):
         capture_mode=args.capture_mode,
         sustained_steps=args.sustained_steps,
         capture_k=args.capture_k,
+        compromised_drone=args.compromised_drone,
     )
 
     episode = 0
@@ -386,6 +394,8 @@ if __name__ == "__main__":
                         help="Disable domain randomization during evaluation")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed")
+    parser.add_argument("--compromised-drone", type=int, default=None,
+                    help="Drone index actively sending mirror-image positions (0, 1, or 2)")
 
     args = parser.parse_args()
 

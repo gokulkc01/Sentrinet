@@ -222,6 +222,7 @@ class BorderEnv(ParallelEnv):
         self.curriculum_noise_max = 0.0
         self.curriculum_shaping_weight = 1.0
         self.curriculum_capture_weight = 0.5
+        self.curriculum_capture_r = float(CAPTURE_R)
         self._update_curriculum_params()
 
         self.possible_agents = [f"drone_{i}" for i in range(N_DRONES)] + ["sensor_0"]
@@ -325,6 +326,7 @@ class BorderEnv(ParallelEnv):
         self.curriculum_intruder_speed = float(0.4 + prog * (1.5 - 0.4))
         self.curriculum_shaping_weight = float(1.0 - prog)
         self.curriculum_capture_weight = float(0.5 + prog)
+        self.curriculum_capture_r = float(4.0 - 2.0 * prog) if self.use_curriculum else float(CAPTURE_R)
     
     def update_curriculum_progress(self, progress: float):
         """Update curriculum stage based on training progress (0.0 to 1.0)."""
@@ -655,6 +657,7 @@ class BorderEnv(ParallelEnv):
         coord_metrics: Dict[str, Any],
     ) -> Dict[str, float]:
         dists = coord_metrics.get("dists", np.linalg.norm(self.drone_pos - self.intruder_pos, axis=1))
+        cap_r = float(getattr(self, "curriculum_capture_r", CAPTURE_R))
         empirical_spoof = self.channel.get_stats()["empirical_spoof_rate"]
         # Proportional security penalty instead of binary cliff.
         sec_penalty = min(1.0, empirical_spoof)
@@ -708,8 +711,13 @@ class BorderEnv(ParallelEnv):
             # Angular coverage: reward surround-like approach patterns.
             r += shaping_weight * W_COVERAGE * angular_coverage_score
 
-            # Capture imminence: use n_close to bridge the gap to terminal success.
-            r += shaping_weight * W_CLOSE * (n_close / float(N_DRONES))
+            # Capture imminence: smooth gradient toward the intruder.
+            close_grad = 0.0
+            for d in dists:
+                if d < 8.0:
+                    close_grad += float(np.exp(-d / max(cap_r, 1e-6)))
+            close_grad /= float(N_DRONES)
+            r += shaping_weight * W_CLOSE * close_grad
 
             # Participation reward: keep all hunters engaged within a useful radius.
             r += shaping_weight * W_PARTICIPATION * (participation_count / float(N_DRONES))
@@ -721,6 +729,17 @@ class BorderEnv(ParallelEnv):
             # Add lightweight trust shaping (max 0.1 to avoid drowning main signal)
             if self.use_trust and hasattr(self, '_sender_trust_sum'):
                 r += shaping_weight * 0.02 * np.tanh(self._sender_trust_sum[i])  # bounded by 0.02
+
+            # Milestone bonuses to prevent hovering just outside capture range.
+            d_self = float(dists[i])
+            if d_self < 6.0:
+                r += shaping_weight * 0.5
+            if d_self < 4.0:
+                r += shaping_weight * 1.0
+            if d_self < 3.0:
+                r += shaping_weight * 2.0
+            if d_self < 2.5:
+                r += shaping_weight * 3.0
 
             rew[f"drone_{i}"] = float(r)
 
@@ -741,8 +760,9 @@ class BorderEnv(ParallelEnv):
         return rew
 
     def _capture_status(self):
+        cap_r = float(getattr(self, "curriculum_capture_r", CAPTURE_R))
         dists = np.linalg.norm(self.drone_pos - self.intruder_pos, axis=1)
-        within = dists < CAPTURE_R
+        within = dists < cap_r
         n_close = int(np.sum(within))
 
         if self.capture_mode == "team":

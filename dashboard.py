@@ -48,10 +48,27 @@ LEGACY_KEY_MAP = {
 
 
 def infer_policy_obs_dim(sd):
-    if "net.0.weight" in sd:
-        return int(sd["net.0.weight"].shape[1])
-    if "fc1.weight" in sd:
-        return int(sd["fc1.weight"].shape[1])
+    # Try common encoder weight keys first (newer checkpoints)
+    for k in ("obs_encoder.0.weight", "obs_encoder.weight", "net.0.weight", "fc1.weight"):
+        if k in sd:
+            w = sd[k]
+            if hasattr(w, "shape") and len(w.shape) >= 2:
+                return int(w.shape[1])
+
+    # For recurrent cores we sometimes have weight_ih with shape (4*hidden, input)
+    for k in ("core.weight_ih", "rnn.weight_ih_l0", "core.weight_hh", "rnn.weight_hh_l0"):
+        if k in sd:
+            w = sd[k]
+            if hasattr(w, "shape") and len(w.shape) >= 2:
+                return int(w.shape[1])
+
+    # Fallback: pick the first 2D weight whose input dim looks plausible
+    for k, v in sd.items():
+        if hasattr(v, "shape") and len(v.shape) == 2:
+            in_dim = int(v.shape[1])
+            if 4 <= in_dim <= 2048:
+                return in_dim
+
     raise KeyError("Could not infer policy input dimension from checkpoint")
 
 # ── Shared State ───────────────────────────────────────────────────────────
