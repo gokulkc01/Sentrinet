@@ -34,3 +34,7 @@ dist/
 # Obsidian workspace config (vault content is tracked; per-user config is not)
 .obsidian/
 **/.obsidian/
+
+# Stage 0 experiment checkpoints (binaries — regenerate via experiments/)
+checkpoints/stage0/
+results/stage0/*_smoke.csv
