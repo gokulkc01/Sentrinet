@@ -42,6 +42,9 @@ Your single place to understand this project end to end: the **theory**, the **c
 - [[Does Trust Actually Help]] — the empirical analysis that drove the pivot
 - [[Known Bugs and Confounds]] — what's broken and why it matters
 
+### 5. Learning the field (go deep)
+- [[Learning Roadmap]] — a staged curriculum (RL → deep RL → MARL → drones → security) tied directly to this code
+
 ---
 
 ## 📌 The mental model in five sentences
