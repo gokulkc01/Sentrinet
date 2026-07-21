@@ -30,3 +30,7 @@ dist/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
+
+# Obsidian workspace config (vault content is tracked; per-user config is not)
+.obsidian/
+**/.obsidian/
