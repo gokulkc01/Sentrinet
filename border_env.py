@@ -230,11 +230,20 @@ class BorderEnv(ParallelEnv):
         self.drone_obs_dim = DRONE_OBS_DIM
         self.sensor_obs_dim = SENSOR_OBS_DIM
         
-          # Observation normalization (running mean/std)
-        self._obs_norm_mean = np.zeros((N_DRONES, 20), dtype=np.float32)  # normalized positions, velocities, etc
-        self._obs_norm_std = np.ones((N_DRONES, 20), dtype=np.float32)
-        self._obs_norm_count = 0
-        self._normalize_obs = True  # apply normalization
+# Observation normalization: fixed, deterministic world-scale (ADR-005).
+        # Stateless — no running statistics, so there is no train/eval skew and
+        # nothing to persist in checkpoints.  Layout matches the 20-dim base obs
+        # built in _drone_obs: pos(3), vel(3), agg_pos(3), agg_vel(3),
+        # sensor_alert(1), rel_intruder_pos(3), battery(1), wind(3).
+        self._normalize_obs = True
+        self._obs_center = np.array([
+            10., 10., 5.,   0., 0., 0.,   10., 10., 5.,   0., 0., 0.,
+            0.,   0., 0., 0.,   0.,   0., 0., 0.,
+        ], dtype=np.float32)
+        self._obs_scale = np.array([
+            10., 10., 5.,   5., 5., 5.,   10., 10., 5.,   5., 5., 5.,
+            1.,   10., 10., 10.,   1.,   6., 6., 6.,
+        ], dtype=np.float32)
 
           # Spaces (DRONE_OBS_DIM=42: 20 base + 3 one-hot ID + 19 relative features)
         inf = np.inf
@@ -338,22 +347,16 @@ class BorderEnv(ParallelEnv):
                 self.channel.set_drop_rate(self._p_drop_eff)
     
     def _normalize_obs_features(self, obs_raw: np.ndarray, drone_idx: int) -> np.ndarray:
-        """Normalize first 20 elements of observation (skip one-hot ID)."""
+        """Fixed world-scale normalization of the 20-dim base obs (ADR-005).
+
+        Deterministic and stateless: (obs - center) / scale using constants
+        derived from the world bounds.  drone_idx is unused (kept for a stable
+        call signature).
+        """
         if not self._normalize_obs or obs_raw.shape[0] < 20:
             return obs_raw
         obs = obs_raw.copy()
-        # Update running normalization for the 20-dim base obs
-        eps = 1e-8
-        if self._obs_norm_count < 1e6:  # avoid drift after convergence
-            delta = obs[:20] - self._obs_norm_mean[drone_idx]
-            self._obs_norm_mean[drone_idx] += delta / max(1, self._obs_norm_count + 1)
-            delta2 = obs[:20] - self._obs_norm_mean[drone_idx]
-            self._obs_norm_std[drone_idx] = np.sqrt(
-                self._obs_norm_std[drone_idx]**2 + delta * delta2 / max(1, self._obs_norm_count + 1)
-            )
-            self._obs_norm_count += 1
-        # Apply normalization
-        obs[:20] = (obs[:20] - self._obs_norm_mean[drone_idx]) / (self._obs_norm_std[drone_idx] + eps)
+        obs[:20] = (obs[:20] - self._obs_center) / self._obs_scale
         return obs
 
     # ── reset ──────────────────────────────────────────────────────────────
@@ -384,6 +387,11 @@ class BorderEnv(ParallelEnv):
         if self._capture_counters is not None:
             self._capture_counters.fill(0)
         self._prev_mean_team_dist = float(np.mean(self._prev_dists))
+        # Reset per-episode trust reward-shaping accumulators.  These previously
+        # persisted across the whole run, saturating tanh() to ~1 and turning the
+        # trust-shaping term into a constant bias instead of a signal.
+        self._sender_trust_sum[:] = 0.0
+        self._sender_reliable_count[:] = 0
 
         # capture/intruder state already initialized in __init__
 
