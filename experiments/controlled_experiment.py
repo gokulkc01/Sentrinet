@@ -92,7 +92,8 @@ def build_env(system: str, seed: int) -> BorderEnv:
     )
 
 
-def train_one(system: str, seed: int, total_steps: int, use_wandb: bool, smoke: bool) -> None:
+def train_one(system: str, seed: int, total_steps: int, use_wandb: bool, smoke: bool,
+              tag: str = "") -> None:
     set_seed(seed)
     env = build_env(system, seed)
 
@@ -101,14 +102,15 @@ def train_one(system: str, seed: int, total_steps: int, use_wandb: bool, smoke: 
         # Tiny budget that still exercises collect -> update -> eval -> save.
         train_cfg.update(n_steps=1024, n_epochs=2, save_every=total_steps, eval_every=total_steps)
 
+    suffix = f"_{tag}" if tag else ""
     config: Dict[str, Any] = dict(train_cfg)
     config.update(
         total_steps=int(total_steps),
         use_wandb=bool(use_wandb),
         run_name=f"{system}_seed{seed}",
-        checkpoint_dir=CHECKPOINT_ROOT,
+        checkpoint_dir=f"{CHECKPOINT_ROOT}{suffix}",
         seed=int(seed),
-        metrics_csv=f"logs/stage0_metrics_{system}_seed{seed}.csv",
+        metrics_csv=f"logs/stage0{suffix}_metrics_{system}_seed{seed}.csv",
     )
 
     print(f"\n=== Stage0 System {system} seed {seed} | {SYSTEMS[system]} | steps={total_steps:,} ===")
@@ -124,6 +126,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps", type=int, default=1_000_000, help="Total env steps per run")
     p.add_argument("--smoke", action="store_true", help="Fast end-to-end pipeline check")
     p.add_argument("--wandb", action="store_true", help="Enable wandb logging (off by default)")
+    p.add_argument("--tag", default="", help="Isolate outputs into checkpoints/stage0_<tag>/ and "
+                                             "logs/stage0_<tag>_metrics_*.csv (e.g. 'diag') so a "
+                                             "diagnostic run does not clobber the full sweep")
     return p.parse_args()
 
 
@@ -136,9 +141,10 @@ def main() -> None:
           f"steps={steps:,} smoke={args.smoke}")
     for system in args.systems:
         for seed in seeds:
-            train_one(system, seed, steps, args.wandb, args.smoke)
+            train_one(system, seed, steps, args.wandb, args.smoke, args.tag)
 
-    print(f"\nAll runs complete. Checkpoints under {CHECKPOINT_ROOT}/<system>_seed<seed>/")
+    suffix = f"_{args.tag}" if args.tag else ""
+    print(f"\nAll runs complete. Checkpoints under {CHECKPOINT_ROOT}{suffix}/<system>_seed<seed>/")
     print("Next: python -m experiments.analyze_controlled "
           + ("--smoke" if args.smoke else "--seeds " + " ".join(str(s) for s in seeds)))
 

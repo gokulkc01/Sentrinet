@@ -37,4 +37,8 @@ dist/
 
 # Stage 0 experiment checkpoints (binaries — regenerate via experiments/)
 checkpoints/stage0/
+checkpoints/stage0_*/
 results/stage0/*_smoke.csv
+
+# Run artifacts (metrics CSVs, console logs — regenerable)
+logs/
