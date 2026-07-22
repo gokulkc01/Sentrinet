@@ -20,8 +20,8 @@
 ## ⚠️ Bug living here
 `_sender_trust_sum` (used by the trust-shaping term) is never reset per episode → `tanh(sum)` saturates to ~1 permanently, so the term is a constant, not a signal. See [[Known Bugs and Confounds]].
 
-## Stage-1 direction
-Simplify aggressively: a clean capture reward + minimal shaping, so the *task* (not the shaping) drives behavior and the trust effect is observable. Fewer knobs = more reproducible science.
+## ✅ Resolved (ADR-007)
+This prediction was confirmed the hard way: the shaped reward's local optimum meant the policy **never learned to pursue at all** (capture stuck at 0%). The fix is `reward_mode="dense_pursuit"` — per-drone distance-reduction + small time cost + sparse +100 capture + collision penalty — which learns to ~60% and climbing. The legacy shaped reward is kept as `reward_mode="shaped"`. See [[ADR-007 - Dense Pursuit Reward]] and [[Does Trust Actually Help]].
 
 ## Related
 - [[Environment - BorderEnv]] · [[Controlled Experiment]] · [[Known Bugs and Confounds]]

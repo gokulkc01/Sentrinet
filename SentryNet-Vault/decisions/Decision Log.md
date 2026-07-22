@@ -10,6 +10,7 @@ Every non-obvious decision, recorded with its **rationale** so future-you (and r
 | [[ADR-004 - Terrain Occlusion Only]] | Add LoS occlusion + RF shadowing; defer photoreal terrain | ✅ Accepted |
 | [[ADR-005 - Fixed Observation Normalization]] | Replace broken running normalization with fixed world-scale | ✅ Accepted |
 | [[ADR-006 - GRU Sustained Known-Solvable Config]] | Revert invariant to GRU + sustained (MLP+team never learned) | ✅ Accepted |
+| [[ADR-007 - Dense Pursuit Reward]] | Replace shaped reward with dense_pursuit (the fix that made it learn) | ✅ Accepted |
 
 ## The meta-decision behind all of these
 **Depth over breadth.** The project's failure mode is not difficulty — it's *scope sprawl with no verified result*. Every ADR above either (a) removes a confound so results become trustworthy, or (b) makes the one core question sharper. Nothing is added for polish.
