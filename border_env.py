@@ -900,20 +900,25 @@ class BorderEnv(ParallelEnv):
         one_hot_id = np.zeros(N_DRONES, dtype=np.float32)
         one_hot_id[i] = 1.0
 
-        rel_target_pos = (self.intruder_pos - self.drone_pos[i]).astype(np.float32)
-        rel_target_vel = (self.intruder_vel - self.drone_vel[i]).astype(np.float32)
+        # Relative features normalized to ~[-1,1] (ADR-008). These were previously
+        # raw at ±20 scale — including rel_target_pos, the single most important
+        # feature — which saturated the Tanh network and made learning fragile even
+        # though the intruder position is always present here.
+        rel_pos_scale = np.array([WORLD_XY, WORLD_XY, 10.0], dtype=np.float32)
+        rel_target_pos = ((self.intruder_pos - self.drone_pos[i]) / rel_pos_scale).astype(np.float32)
+        rel_target_vel = ((self.intruder_vel - self.drone_vel[i]) / MAX_SPEED).astype(np.float32)
 
         teammate_rel_pos = []
         teammate_rel_vel = []
         for j in range(N_DRONES):
             if j == i:
                 continue
-            teammate_rel_pos.append((self.drone_pos[j] - self.drone_pos[i]).astype(np.float32))
-            teammate_rel_vel.append((self.drone_vel[j] - self.drone_vel[i]).astype(np.float32))
+            teammate_rel_pos.append(((self.drone_pos[j] - self.drone_pos[i]) / rel_pos_scale).astype(np.float32))
+            teammate_rel_vel.append(((self.drone_vel[j] - self.drone_vel[i]) / MAX_SPEED).astype(np.float32))
 
         teammate_rel_pos_arr = np.concatenate(teammate_rel_pos).astype(np.float32)
         teammate_rel_vel_arr = np.concatenate(teammate_rel_vel).astype(np.float32)
-        dist_feature = np.array([dist], dtype=np.float32)
+        dist_feature = np.array([dist / 30.0], dtype=np.float32)  # world diagonal ~30 m
 
         rel_features = np.concatenate([
             rel_target_pos,
