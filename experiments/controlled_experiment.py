@@ -51,8 +51,9 @@ SYSTEMS: Dict[str, Dict[str, Any]] = {
 INVARIANT_ENV: Dict[str, Any] = dict(
     use_pybullet=False,
     domain_rand=True,
-    use_curriculum=False,   # curriculum is shelved; it would break the invariant
-    capture_mode="team",
+    use_curriculum=False,       # curriculum is shelved; it would break the invariant
+    capture_mode="sustained",   # ADR-006: MLP+team never learned; GRU+sustained is
+    sustained_steps=1,          #   the known-solvable config (old runs hit ~99%)
     spoof_std=2.0,
 )
 INVARIANT_TRAIN: Dict[str, Any] = dict(
@@ -61,12 +62,14 @@ INVARIANT_TRAIN: Dict[str, Any] = dict(
     lam=0.95,
     clip_eps=0.2,
     value_coef=0.5,
-    entropy_coef=0.01,      # same for all — NOT the old 0.005-for-C special case
+    entropy_coef=0.005,     # ADR-006: was 0.01; the bonus was dominating a dead
+                            #   gradient (rising entropy). Applied to ALL systems.
     max_grad_norm=10.0,
     n_steps=2048,
     batch_size=256,
     n_epochs=4,
-    policy_type="mlp",      # same for all — NOT the old GRU-for-C special case
+    policy_type="gru",      # ADR-006: MLP couldn't handle partial observability.
+                            #   Same for ALL systems, so the invariant still holds.
     hidden_dim=128,
     save_every=50_000,
     eval_every=50_000,

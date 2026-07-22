@@ -68,7 +68,8 @@ def evaluate_checkpoint(system: str, seed: int, drop: float, n_episodes: int) ->
         spoof_std=EVAL_SPOOF_STD,
         use_trust=(system == "C"),
         compromised_drone=COMPROMISED_DRONE,
-        capture_mode="team",
+        capture_mode="sustained",   # must match training (ADR-006)
+        sustained_steps=1,
         seed=seed,
     )
     trainer = MAPPOTrainer(
@@ -84,19 +85,34 @@ def evaluate_checkpoint(system: str, seed: int, drop: float, n_episodes: int) ->
     )
     trainer.load_checkpoint(str(ckpt_path))
 
+    drone_keys = trainer._drone_keys()
+    is_recurrent = trainer.policy.is_recurrent
     captures = 0
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
+        # Recurrent policies need their hidden state threaded through the episode;
+        # calling get_action per step would run the GRU as if memoryless.
+        policy_state = trainer._init_policy_state() if is_recurrent else None
         done = False
         info: Dict = {}
         while not done:
             actions = {}
-            for i in range(3):
-                a, _ = trainer.policy.get_action(obs[f"drone_{i}"], deterministic=True)
-                actions[f"drone_{i}"] = a
+            with torch.no_grad():
+                for k in drone_keys:
+                    if is_recurrent:
+                        action, _, next_hidden = trainer.policy.step(
+                            obs[k], deterministic=True, hidden_state=policy_state[k]
+                        )
+                        if trainer.policy_type == "gru":
+                            policy_state[k] = next_hidden.squeeze(0)
+                        else:
+                            policy_state[k] = (next_hidden[0].squeeze(0), next_hidden[1].squeeze(0))
+                    else:
+                        action, _ = trainer.policy.get_action(obs[k], deterministic=True)
+                    actions[k] = action
             actions["sensor_0"] = 1 if float(obs["sensor_0"][0]) > 0.5 else 0
             obs, _, term, trunc, info = env.step(actions)
-            done = any(term[f"drone_{i}"] or trunc[f"drone_{i}"] for i in range(3))
+            done = any(term[k] or trunc[k] for k in drone_keys)
         captures += int(bool(info.get("drone_0", {}).get("captured", False)))
     env.close()
     return captures / n_episodes

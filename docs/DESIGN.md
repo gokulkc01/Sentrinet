@@ -59,7 +59,7 @@ packet loss"):
 
 | Held identical across A/B/C | Varies |
 |---|---|
-| MLP policy (128×128), entropy 0.01, `team` capture, 1M steps, **no curriculum**, identical eval protocol, identical seeds | **A:** clean training, no trust · **B:** adversarial training (drop 0.2, spoof 0.1), no trust · **C:** adversarial training + EMA trust |
+| GRU policy (128×128), entropy 0.005, `sustained` capture (1 step), 1M steps, **no curriculum**, identical eval protocol, identical seeds *(revised per ADR-006: MLP+team never learned)* | **A:** clean training, no trust · **B:** adversarial training (drop 0.2, spoof 0.1), no trust · **C:** adversarial training + EMA trust |
 
 - **8 seeds** per system.
 - **Evaluation:** 200 episodes × drop ∈ {0.0, 0.1, …, 0.8} × spoof 0.1 with a

@@ -7,7 +7,7 @@ The comparison is only valid if A/B/C are identical in **everything except the v
 
 | Held identical | Varies (the only difference) |
 |---|---|
-| MLP policy 128×128 · entropy 0.01 · `team` capture · 1M steps · **no curriculum** · same eval protocol · same seeds | **A:** clean training, no trust · **B:** adversarial training (drop 0.2, spoof 0.1), no trust · **C:** adversarial training + EMA trust |
+| GRU policy 128×128 · entropy 0.005 · `sustained` capture · 1M steps · **no curriculum** · same eval protocol · same seeds *(revised — see [[ADR-006 - GRU Sustained Known-Solvable Config]])* | **A:** clean training, no trust · **B:** adversarial training (drop 0.2, spoof 0.1), no trust · **C:** adversarial training + EMA trust |
 
 > The old code violated this: System C used a **GRU + sustained capture + different entropy** while A/B used MLP + team. Any C-vs-A/B gap was uninterpretable. See [[Known Bugs and Confounds]].
 
