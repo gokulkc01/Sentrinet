@@ -526,10 +526,38 @@ class MAPPOTrainer:
         save_every = int(self.config["save_every"])
         eval_every = int(self.config["eval_every"])
 
+        # Optional per-run metrics CSV (the training curve) — robust to console
+        # redirection issues; captures the learning curve regardless of logging.
+        metrics_csv_path = self.config.get("metrics_csv")
+        csv_file = None
+        csv_writer = None
+        if metrics_csv_path:
+            import os as _os
+            import csv as _csv
+
+            _os.makedirs(_os.path.dirname(metrics_csv_path) or ".", exist_ok=True)
+            csv_file = open(metrics_csv_path, "w", newline="")
+            _fieldnames = [
+                "step", "train/reward", "train/capture_rate", "train/capture_count",
+                "train/entropy", "train/approx_kl", "train/policy_loss", "train/value_loss",
+                "env/trust_mean", "env/drop_rate",
+                "eval/capture_rate", "eval/mean_reward", "eval/mean_steps", "eval/mean_trust",
+            ]
+            csv_writer = _csv.DictWriter(
+                csv_file, fieldnames=_fieldnames, extrasaction="ignore", restval=""
+            )
+            csv_writer.writeheader()
+
         while self.total_env_steps < total_steps:
             rollout_stats = self.collect_rollout()
             loss_stats = self.update()
             self.total_env_steps += n_steps
+            # Fire eval/save when we CROSS a multiple of the interval. The old
+            # `% interval == 0` check silently never fired when the interval was
+            # not an exact multiple of n_steps, so best.pt was never saved.
+            _prev_steps = self.total_env_steps - n_steps
+            do_eval = (self.total_env_steps // eval_every) > (_prev_steps // eval_every)
+            do_save = (self.total_env_steps // save_every) > (_prev_steps // save_every)
 
             metrics = {
                 "train/reward": rollout_stats["mean_reward"],
@@ -551,7 +579,7 @@ class MAPPOTrainer:
                 "env/battery_mean": float(np.mean(getattr(self.env, "battery", np.zeros((3,), dtype=np.float32)))),
             }
 
-            if self.total_env_steps % eval_every == 0:
+            if do_eval:
                 eval_stats = self.evaluate(
                     n_episodes=50,
                     p_drop_eval=float(getattr(self.env.channel, "p_drop", 0.0)),
@@ -595,10 +623,18 @@ class MAPPOTrainer:
                 f"ValueLoss={loss_stats['value_loss']:8.4f}"
             )
 
-            if self.total_env_steps % save_every == 0:
+            if csv_writer is not None:
+                _row = {"step": self.total_env_steps}
+                _row.update(metrics)
+                csv_writer.writerow(_row)
+                csv_file.flush()
+
+            if do_save:
                 self.save_checkpoint(step=self.total_env_steps)
 
         self.save_checkpoint(step=self.total_env_steps)
+        if csv_file is not None:
+            csv_file.close()
 
         if wandb is not None:
             wandb.finish()

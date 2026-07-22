@@ -108,6 +108,7 @@ def train_one(system: str, seed: int, total_steps: int, use_wandb: bool, smoke: 
         run_name=f"{system}_seed{seed}",
         checkpoint_dir=CHECKPOINT_ROOT,
         seed=int(seed),
+        metrics_csv=f"logs/stage0_metrics_{system}_seed{seed}.csv",
     )
 
     print(f"\n=== Stage0 System {system} seed {seed} | {SYSTEMS[system]} | steps={total_steps:,} ===")
