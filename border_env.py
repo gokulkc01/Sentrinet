@@ -195,6 +195,12 @@ class BorderEnv(ParallelEnv):
         sustained_steps: int = 3,           # for 'sustained' mode: steps required
         intruder_profile: str = "evasive", # one of: 'passive', 'evasive', 'reactive'
         reward_mode: str = "dense_pursuit", # 'dense_pursuit' (default) or 'shaped' (legacy)
+        # Reward-shaping knobs (ADR-010). Defaults reproduce pre-ADR-010 behaviour
+        # exactly, so the existing 3-seed baseline remains a valid comparison.
+        proximity_weight: float = 0.0,      # 0 = off; non-telescoping "be close" term
+        collision_mode: str = "cliff",      # 'cliff' (legacy flat step) or 'graded'
+        collision_weight: float = 5.0,      # penalty magnitude at contact
+        collision_radius: float = 1.5,      # separation below which the penalty applies
         # Curriculum learning
         use_curriculum: bool = False,
         curriculum_progress: float = 0.0,  # 0.0 (easiest) to 1.0 (hardest)
@@ -219,6 +225,10 @@ class BorderEnv(ParallelEnv):
         self.capture_k = int(capture_k)
         self.sustained_steps = max(1, int(sustained_steps))
         self.reward_mode = str(reward_mode)
+        self.proximity_weight = float(proximity_weight)
+        self.collision_mode = str(collision_mode)
+        self.collision_weight = float(collision_weight)
+        self.collision_radius = float(collision_radius)
         self.curriculum_intruder_speed = 1.5
         self.curriculum_wind_max = 0.0
         self.curriculum_noise_max = 0.0
@@ -772,28 +782,49 @@ class BorderEnv(ParallelEnv):
         return rew
 
     def _dense_pursuit_rewards(self, actions, sensor_alert_for_reward, captured, dists):
-        """Clean dense pursuit reward (default; see ADR-007).
+        """Dense pursuit reward (ADR-007, reshaped by ADR-010).
 
         Each drone is rewarded for reducing its own distance to the intruder,
         pays a small time cost, receives a large sparse bonus on capture, and a
-        collision-safety penalty.  This avoids the 'spread out and hover' local
-        optimum of the legacy 'shaped' reward, under which the policy never
-        learned to pursue (capture stayed at 0%; dense reward reaches ~60% and
-        climbing in 120k steps).
+        collision-safety penalty.
+
+        ADR-010 context: measured on 3 seeds x 300k steps, the ADR-007 form did
+        NOT learn (13 captures in 900k steps, flat entropy).  A reward
+        decomposition against a scripted pursuer that captures 100% of the time
+        showed why: `approach` telescopes to (d_initial - d_final) over an
+        episode, so it is path-independent and accounted for only 0.5% of the
+        reward difference between always-capturing and never-capturing policies.
+        99.5% of the signal was the sparse terminal bonus.  Two knobs address it,
+        both defaulting OFF so the measured baseline stays reproducible:
+        `proximity_weight` (non-telescoping) and `collision_mode='graded'`.
         """
         rew: Dict[str, float] = {}
         approach = self._prev_dists - dists  # per-drone one-step distance reduction
+        w_prox = self.proximity_weight
         for i in range(N_DRONES):
             r = float(approach[i]) - 0.02      # close the gap; small time cost
+            if w_prox > 0.0:
+                # Rewards *being* close rather than only *getting* closer, and its
+                # gradient strengthens as d -> 0, pulling the policy through the
+                # final metres that `approach` alone is indifferent to.
+                r += w_prox / (1.0 + float(dists[i]))
             if captured:
                 r += W_CAPTURE                 # large sparse capture bonus
             rew[f"drone_{i}"] = r
         # Collision-safety penalty between hunters (the one shaping term we keep).
+        r_safe = self.collision_radius
+        graded = self.collision_mode == "graded"
         for i in range(N_DRONES):
             for j in range(i + 1, N_DRONES):
-                if np.linalg.norm(self.drone_pos[i] - self.drone_pos[j]) < 1.5:
-                    rew[f"drone_{i}"] -= 5.0
-                    rew[f"drone_{j}"] -= 5.0
+                d_ij = float(np.linalg.norm(self.drone_pos[i] - self.drone_pos[j]))
+                if d_ij >= r_safe:
+                    continue
+                # 'cliff' is the legacy flat step: 20x the per-step approach signal,
+                # applied exactly where drones must converge to capture. 'graded'
+                # keeps collision avoidance but ramps 0 -> weight at contact.
+                pen = self.collision_weight * (1.0 - d_ij / r_safe) if graded else self.collision_weight
+                rew[f"drone_{i}"] -= pen
+                rew[f"drone_{j}"] -= pen
         # Bookkeeping for the next step (mirrors the shaped path).
         self._prev_dists = dists.copy()
         self._prev_mean_team_dist = float(np.mean(dists))

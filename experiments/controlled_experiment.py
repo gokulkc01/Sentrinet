@@ -75,6 +75,17 @@ INVARIANT_TRAIN: Dict[str, Any] = dict(
     eval_every=50_000,
 )
 
+# ADR-010 reward-shaping ablation arms. 'baseline' reproduces the measured 3-seed
+# run that did NOT learn (13 captures in 900k steps); every other arm changes ONE
+# thing, so a difference is attributable. None of these alter task difficulty:
+# capture radius, intruder speed/evasiveness and sustained_steps are untouched.
+REWARD_ARMS: Dict[str, Dict[str, Any]] = {
+    "baseline": {},
+    "prox": {"proximity_weight": 0.5},
+    "coll": {"collision_mode": "graded", "collision_weight": 2.0},
+    "both": {"proximity_weight": 0.5, "collision_mode": "graded", "collision_weight": 2.0},
+}
+
 CHECKPOINT_ROOT = "checkpoints/stage0"
 
 
@@ -84,7 +95,7 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def build_env(system: str, seed: int) -> BorderEnv:
+def build_env(system: str, seed: int, arm: str = "baseline") -> BorderEnv:
     cfg = SYSTEMS[system]
     return BorderEnv(
         seed=seed,
@@ -92,13 +103,14 @@ def build_env(system: str, seed: int) -> BorderEnv:
         p_spoof=cfg["p_spoof"],
         use_trust=cfg["use_trust"],
         **INVARIANT_ENV,
+        **REWARD_ARMS[arm],
     )
 
 
 def train_one(system: str, seed: int, total_steps: int, use_wandb: bool, smoke: bool,
-              tag: str = "") -> None:
+              tag: str = "", arm: str = "baseline") -> None:
     set_seed(seed)
-    env = build_env(system, seed)
+    env = build_env(system, seed, arm)
 
     train_cfg = dict(INVARIANT_TRAIN)
     if smoke:
@@ -113,10 +125,12 @@ def train_one(system: str, seed: int, total_steps: int, use_wandb: bool, smoke: 
         run_name=f"{system}_seed{seed}",
         checkpoint_dir=f"{CHECKPOINT_ROOT}{suffix}",
         seed=int(seed),
+        reward_arm=str(arm),          # provenance: recorded into the checkpoint
         metrics_csv=f"logs/stage0{suffix}_metrics_{system}_seed{seed}.csv",
     )
 
-    print(f"\n=== Stage0 System {system} seed {seed} | {SYSTEMS[system]} | steps={total_steps:,} ===")
+    print(f"\n=== Stage0 System {system} seed {seed} | {SYSTEMS[system]} | "
+          f"arm={arm} {REWARD_ARMS[arm]} | steps={total_steps:,} ===")
     trainer = MAPPOTrainer(env=env, config=config)
     trainer.train()
     env.close()
@@ -129,6 +143,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps", type=int, default=1_000_000, help="Total env steps per run")
     p.add_argument("--smoke", action="store_true", help="Fast end-to-end pipeline check")
     p.add_argument("--wandb", action="store_true", help="Enable wandb logging (off by default)")
+    p.add_argument("--arm", default="baseline", choices=sorted(REWARD_ARMS),
+                   help="ADR-010 reward-shaping arm. Does NOT change task difficulty.")
     p.add_argument("--tag", default="", help="Isolate outputs into checkpoints/stage0_<tag>/ and "
                                              "logs/stage0_<tag>_metrics_*.csv (e.g. 'diag') so a "
                                              "diagnostic run does not clobber the full sweep")
@@ -144,7 +160,7 @@ def main() -> None:
           f"steps={steps:,} smoke={args.smoke}")
     for system in args.systems:
         for seed in seeds:
-            train_one(system, seed, steps, args.wandb, args.smoke, args.tag)
+            train_one(system, seed, steps, args.wandb, args.smoke, args.tag, args.arm)
 
     suffix = f"_{args.tag}" if args.tag else ""
     print(f"\nAll runs complete. Checkpoints under {CHECKPOINT_ROOT}{suffix}/<system>_seed<seed>/")

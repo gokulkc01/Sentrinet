@@ -21,7 +21,7 @@ Initialized in `__init__`, never in `reset()`. Accumulates forever → `tanh(sum
 `SyntaxError` (escaped quotes in an f-string). The file can't even be parsed.
 
 ## 🟠 Design warts (document or fix)
-- **Shared critic value across drones** — one joint value assigned to 3 drones while returns are per-drone. Defensible team-value design, but undocumented. ([[MAPPO Trainer]])
+- ~~**Shared critic value across drones**~~ — ✅ **RESOLVED, and it was not a wart — it was the blocker.** One joint value was assigned to 3 drones while returns are per-drone. Filed here as "defensible team-value design" — that judgement was **wrong**. Once [[ADR-007 - Dense Pursuit Reward]] made rewards per-drone, the critic had to fit three different returns from one identical input, so the irreducible residual *became the advantage*: advantages ran 15–20× reward scale **and diverged** (std 2.85→6.40→9.25) while the real signal decayed (norm adv 0.49→0.33→0.30). Fixed by conditioning the critic on a one-hot agent ID ([[ADR-009 - Per-Agent Critic]]). **Lesson: a "defensible design" interacting with a later change is exactly how a latent flaw becomes an active blocker — re-examine deferred warts whenever the reward changes.** ([[MAPPO Trainer]])
 - **Sensor not learned** — hard-coded echo of the detection flag; old "QMIX agent" docs are fiction. ([[Observation and Action Spaces]])
 - **Reward function** — 90 lines, ~15 magic weights → ceiling effects. ([[Reward Design]])
 

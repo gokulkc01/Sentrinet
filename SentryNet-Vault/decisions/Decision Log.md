@@ -12,6 +12,8 @@ Every non-obvious decision, recorded with its **rationale** so future-you (and r
 | [[ADR-006 - GRU Sustained Known-Solvable Config]] | Revert invariant to GRU + sustained (MLP+team never learned) | ✅ Accepted |
 | [[ADR-007 - Dense Pursuit Reward]] | Replace shaped reward with dense_pursuit (the fix that made it learn) | ✅ Accepted |
 | [[ADR-008 - Normalize Relative Observation Features]] | Normalize raw ±20 relative features to fix fragile learning | ✅ Accepted (validating) |
+| [[ADR-009 - Per-Agent Critic]] | Condition the critic on a one-hot agent ID so it predicts per-drone returns, not their mean | ✅ Accepted (mechanism verified; no learning gain alone) |
+| [[ADR-010 - Reward Shaping Is the Blocker]] | Telescoping approach term gave 0.5% of the signal; add non-telescoping proximity + grade the collision cliff | ✅ Accepted (3 seeds; coll strongest) |
 
 ## The meta-decision behind all of these
 **Depth over breadth.** The project's failure mode is not difficulty — it's *scope sprawl with no verified result*. Every ADR above either (a) removes a confound so results become trustworthy, or (b) makes the one core question sharper. Nothing is added for polish.
