@@ -66,9 +66,12 @@ class MAPPOTrainer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Policy receives the expanded per-drone observation.
-        # Value receives the concatenation of all drone observations.
+        # Value receives the joint observation plus a one-hot agent ID, so it can
+        # predict each drone's own return instead of the team mean (ADR-009).
+        self.n_drones = len(self._drone_keys())
+        self.critic_obs_dim = self.obs_dim * self.n_drones + self.n_drones
         self.policy = PolicyNet(obs_dim=self.obs_dim, act_dim=3, hidden_dim=self.hidden_dim, policy_type=self.policy_type).to(self.device)
-        self.value = ValueNet(obs_dim=self.obs_dim * 3).to(self.device)
+        self.value = ValueNet(obs_dim=self.critic_obs_dim).to(self.device)
 
         lr = float(self.config["lr"])
         self.policy_opt = torch.optim.Adam(self.policy.parameters(), lr=lr)
@@ -106,14 +109,20 @@ class MAPPOTrainer:
         return {k: (torch.zeros(self.hidden_dim, device=device), torch.zeros(self.hidden_dim, device=device)) for k in self._drone_keys()}
 
     def _obs_all_tensor(self, obs_dict: Dict[str, np.ndarray], info_dict: Optional[Dict[str, Any]] = None) -> torch.Tensor:
-        """Concat all drone obs (now 23-dim with one-hot ID) into critic input.
-        
-        Critic receives: 23*3 = 69 dims (base)
-        Optional augmentation: trust scores + channel stats (can be added here if info provided).
+        """Build the agent-conditioned critic input: one row per drone.
+
+        Each row is the joint observation (42*3 = 126 dims today) followed by a
+        one-hot agent ID. Without the ID every drone hands the critic an identical input
+        while the dense reward gives them different returns, so the best the critic
+        can do is predict their mean and the leftover error lands in the advantage.
+
+        Returns: (n_drones, obs_dim*3 + n_drones)
         """
-        drone_obs = np.concatenate([obs_dict[k] for k in self._drone_keys()], axis=0).astype(np.float32)
-        obs_all = torch.as_tensor(drone_obs, dtype=torch.float32, device=self.device).unsqueeze(0)  # (1, 69)
-        assert obs_all.shape == (1, self.obs_dim * 3), f"Expected (1, {self.obs_dim * 3}), got {tuple(obs_all.shape)}"
+        n = self.n_drones
+        joint = np.concatenate([obs_dict[k] for k in self._drone_keys()], axis=0).astype(np.float32)
+        critic_in = np.concatenate([np.tile(joint, (n, 1)), np.eye(n, dtype=np.float32)], axis=1)
+        obs_all = torch.as_tensor(critic_in, dtype=torch.float32, device=self.device)
+        assert obs_all.shape == (n, self.critic_obs_dim), f"Expected ({n}, {self.critic_obs_dim}), got {tuple(obs_all.shape)}"
         return obs_all
 
     @staticmethod
@@ -191,10 +200,9 @@ class MAPPOTrainer:
                         actions_dict[k] = action
                         log_probs_dict[k] = float(log_prob)
 
-                obs_all = self._obs_all_tensor(obs)
-                v = float(self.value(obs_all).squeeze(0).squeeze(0).cpu().item())
-                for k in self._drone_keys():
-                    values_dict[k] = v
+                v_per_agent = self.value(self._obs_all_tensor(obs)).squeeze(-1).cpu().numpy()
+                for i, k in enumerate(self._drone_keys()):
+                    values_dict[k] = float(v_per_agent[i])
 
             actions_env: Dict[str, Any] = {k: actions_dict[k] for k in self._drone_keys()}
             actions_env["sensor_0"] = 1 if float(obs["sensor_0"][0]) > 0.5 else 0
@@ -236,9 +244,7 @@ class MAPPOTrainer:
             obs = next_obs
 
         with torch.no_grad():
-            obs_all_last = self._obs_all_tensor(obs)
-            last_v = float(self.value(obs_all_last).squeeze(0).squeeze(0).cpu().item())
-            last_values = np.array([last_v, last_v, last_v], dtype=np.float32)
+            last_values = self.value(self._obs_all_tensor(obs)).squeeze(-1).cpu().numpy().astype(np.float32)
 
         self.buffer.compute_gae(last_values=last_values)
 
@@ -276,8 +282,18 @@ class MAPPOTrainer:
         approx_kls: List[float] = []
 
         total = self.buffer.ptr * self.buffer.n_drones
+        n_d = self.buffer.n_drones
+        # np.repeat orders rows [t0a0, t0a1, t0a2, t1a0, ...]; np.tile(eye) and
+        # buffer.returns.reshape(total) share that ordering, so the one-hot ID on
+        # each row names the drone whose return that row is trained against.
         obs_all_t = self.buffer.obs[: self.buffer.ptr].reshape(self.buffer.ptr, -1)
-        obs_all_flat = np.repeat(obs_all_t, repeats=self.buffer.n_drones, axis=0)
+        obs_all_flat = np.concatenate(
+            [
+                np.repeat(obs_all_t, repeats=n_d, axis=0),
+                np.tile(np.eye(n_d, dtype=np.float32), (self.buffer.ptr, 1)),
+            ],
+            axis=1,
+        )
         flat_returns = self.buffer.returns[: self.buffer.ptr].reshape(total)
         flat_hidden = None
         flat_cell = None
@@ -497,6 +513,13 @@ class MAPPOTrainer:
         """Load model and optimizer state from checkpoint."""
         ckpt = torch.load(path, map_location=self.device)
         self.policy.load_state_dict(ckpt["policy_state_dict"])
+        ckpt_critic_dim = int(ckpt["value_state_dict"]["net.0.weight"].shape[1])
+        if ckpt_critic_dim != self.critic_obs_dim:
+            raise ValueError(
+                f"Checkpoint '{path}' has a {ckpt_critic_dim}-dim critic but this build "
+                f"expects {self.critic_obs_dim} (joint state + one-hot agent ID, ADR-009). "
+                "Checkpoints from before the per-agent critic fix cannot be resumed; retrain."
+            )
         self.value.load_state_dict(ckpt["value_state_dict"])
         self.policy_opt.load_state_dict(ckpt["policy_opt_state_dict"])
         self.value_opt.load_state_dict(ckpt["value_opt_state_dict"])

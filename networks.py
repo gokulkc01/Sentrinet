@@ -212,17 +212,18 @@ class PolicyNet(nn.Module):
 
 
 class ValueNet(nn.Module):
-    """Centralized critic with flexible input dimension.
+    """Centralized, agent-conditioned critic with flexible input dimension.
 
-    Critic receives augmented state:
-    - Base: 60 dims (3 drones x 20 base obs) + 9 dims (3 drones x 3 one-hot ID) = 69
-    - Augmented: 69 + trust_scores (N_DRONES-1 per drone x 3 = 6) + channel_stats = flexible
+    Critic receives, per agent:  obs_dim * n_drones + n_drones
+    - Joint state: every drone's observation concatenated (3 x 42 = 126 today)
+    - Agent ID: one-hot naming which drone this value is for (3) -> 129
 
-    Default: 60 dims (concatenated drone obs without one-hot for backward compat),
-    or up to 80+ with augmentation.
+    The agent ID is what makes the critic agent-specific. The joint state is shared
+    by all three drones, so without it the critic gets one input for three different
+    per-drone returns and can only fit their mean (ADR-009).
     """
 
-    def __init__(self, obs_dim: int = 69, hidden_dim: int = 128) -> None:
+    def __init__(self, obs_dim: int = 129, hidden_dim: int = 128) -> None:
         super().__init__()
         self.obs_dim = obs_dim
         self.hidden_dim = hidden_dim
