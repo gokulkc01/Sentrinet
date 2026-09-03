@@ -1,139 +1,191 @@
 # Learning Roadmap
 
-A staged, in-depth curriculum for the concepts SentryNet is built on. Ordered by dependency: earlier phases unlock later ones.
+A staged curriculum for the concepts SentryNet v3 is built on, ordered by what the
+project needs next.
+
+> **Rewritten 2026-09-04 for [[ADR-011 - Pivot to Cooperative Integrity Monitoring]].**
+> The previous version spent weeks 1–7 on RL foundations → PPO/GAE → MARL. Under the
+> reframe that is the wrong 60% of the document: you already know PPO/GAE cold — ten ADRs
+> deep into a reward decomposition and a per-agent critic fix is a level of understanding
+> no tutorial produces — and MARL stops being load-bearing the moment the pursuit
+> controller becomes scripted. Those phases are **demoted, not deleted**; they return for
+> the phase-E ablation.
 
 ## How to use this
 
-- **Learn grounded, not abstract.** After each topic, open the matching SentryNet file/note and explain it line by line. If you can't, you haven't learned it yet.
-- **Two directions, use both.** *Top-down:* start from a file that confuses you and pull the threads. *Bottom-up:* build the fundamentals in order below. A hybrid sticks best.
-- **You learn RL by implementing it.** Every phase has a **hands-on checkpoint** — a small thing you build from scratch. Reading alone will fool you into thinking you understand.
-- **Priority if you want to be effective on the project *now*:** Phase 2 (PPO/GAE) → Phase 6 (experimental rigor) → Phase 5 (trust/robust stats). Those three map to what you're doing in Stage 0–1 and to the bugs that bit you. Fill in Phases 1/3/4 around them.
+- **Make every checkpoint a project artifact.** On a 10–12 week timeline you cannot
+  afford to learn a thing twice. Don't "implement a toy Kalman filter" — implement *the*
+  EKF this project needs, and let the exercise ship.
+- **Don't front-load.** Eight weeks of reading before any code is the same scope-sprawl
+  failure in a new costume. Learn topic 1 properly, then interleave; topics 2, 4 and 6
+  are reading you do while sweeps run.
+- **Depth is asymmetric.** Go genuinely deep on estimation theory. Stay deliberately
+  shallow on GNSS signal processing, RF propagation and embedded work — you need correct
+  vocabulary and a defensible measurement model, nothing more. Getting that ratio wrong
+  in either direction costs the project.
 
-```
-Phase 0 (math, as-needed)
-      │
-Phase 1  RL foundations ──► Phase 2  Deep RL / PPO+GAE ──► Phase 3  Multi-agent RL
-                                        │                        │
-                                        ▼                        ▼
-                              Phase 6  Experimental rigor   Phase 4  Drones / control / estimation
-                                        │                        │
-                                        └────────► Phase 5  Adversarial / trust / robust stats ◄──┘
-```
+## What you can stop learning
 
----
-
-## Phase 0 — Mathematical foundations (as-needed, don't front-load)
-
-**Why here:** RL is applied probability + optimization. You need *just enough*, pulled in when a topic demands it — not a semester up front.
-
-**Core concepts:** probability (expectation, variance, conditional prob, Bayes, Gaussians), linear algebra (vectors, matrices, norms, dot products), calculus/optimization (gradients, chain rule, SGD, convexity intuition), a little information theory (entropy, KL divergence).
-
-**Resources:** *Mathematics for Machine Learning* (Deisenroth, Faisal, Ong — free PDF); 3Blue1Brown's *Essence of Linear Algebra* and *Essence of Calculus* (YouTube).
-
-**SentryNet tie-in:** Gaussians → the policy's action distribution ([[Networks and Rollout Buffer]]); KL divergence → PPO's `approx_kl` ([[MAPPO Trainer]]); norms → every distance in [[Environment - BorderEnv]].
-
-**Checkpoint:** derive the gradient of a scalar loss w.r.t. a weight matrix by hand; explain why entropy measures "randomness" of the policy.
+- **GNSS signal processing / SDR** (correlation peaks, C/N₀ monitoring, GPS-SDR-SIM). We
+  work at the **measurement level** — a node's *reported position* is wrong. You never
+  touch a signal.
+- **Becoming a GNSS expert.** Two weeks of reading, not a semester.
+- **ROS 2 / Crazyswarm** until hardware is actually committed (deferred, 2026-09-04).
 
 ---
 
-## Phase 1 — Reinforcement Learning foundations
+## 1 — Estimation theory ⭐ THE critical gap
 
-**Why here:** Everything else is built on the MDP framework. Skip this and PPO is cargo-cult.
+**Why here:** it is the spine. Without it, trust stays a heuristic with hand-tuned
+constants — v1 computed `accuracy = max(0, 1 − error/5.0)`, and there is no way to state
+a false-alarm rate for `5.0`, therefore no way to defend it. With estimation theory the
+same idea becomes a hypothesis test whose `alpha` **is** the false-alarm probability.
 
-**Core concepts:** Markov Decision Processes (states, actions, transitions, rewards, γ); return; value functions V(s) and Q(s,a); the Bellman equations; policy vs value methods; exploration/exploitation; temporal-difference learning; on-policy vs off-policy.
+**Core:** Kalman filter → EKF; state and covariance; the **innovation (residual)
+sequence** and its covariance; **NIS / Mahalanobis distance** → **χ² gating**; fault
+detection, identification and exclusion (FDI); covariance consistency.
 
-**Resources:** **Sutton & Barto, *Reinforcement Learning: An Introduction* (2nd ed, free PDF)** — chapters 3 (MDPs), 4 (DP), 5 (Monte Carlo), 6 (TD), 9 (approximation), 13 (policy gradients). **David Silver's RL Course** (DeepMind/UCL lectures on YouTube) — the canonical video companion.
+**Resources:** **Bar-Shalom, Li & Kirubarajan, *Estimation with Applications to Tracking
+and Navigation*** (primary — has the NIS/χ²/gating machinery explicitly) ·
+**Thrun, Burgard & Fox, *Probabilistic Robotics*** (gentler entry) · Simon, *Optimal
+State Estimation* (fault detection).
 
-**SentryNet tie-in:** [[Multi-Agent Reinforcement Learning]], [[Glossary]]. `gamma=0.99` in [[MAPPO Trainer]] is the discount γ; the critic is V(s).
+**Ties to:** `sentrinet/integrity/{residuals,chi2}.py`.
 
-**Checkpoint:** implement **value iteration** and **tabular Q-learning** on a small gridworld from scratch. Watch the value function converge.
-
----
-
-## Phase 2 — Deep RL & policy gradients (the core of what you use) ⭐
-
-**Why here:** SentryNet *is* a policy-gradient method. This is the phase to go deepest.
-
-**Core concepts:** function approximation with neural nets; the policy-gradient theorem; REINFORCE; baselines & variance reduction; actor-critic; advantage estimation → **GAE**; trust-region idea → **PPO**'s clipped objective; entropy regularization; the tanh-squashed Gaussian for bounded continuous actions and its log-prob correction.
-
-**Resources:** **OpenAI *Spinning Up in Deep RL*** — the single best practical path from vanilla PG to PPO, with clean code. **Schulman et al., *Proximal Policy Optimization Algorithms* (2017)** — the PPO paper. **Schulman et al., *High-Dimensional Continuous Control Using Generalized Advantage Estimation* (2015)** — the GAE paper. Costa Huang's *The 37 Implementation Details of PPO* — invaluable for the gotchas (this is the level at which your normalization bug lived).
-
-**SentryNet tie-in:** [[PPO and GAE]], [[Networks and Rollout Buffer]], [[MAPPO Trainer]]. Map every term: `compute_gae` ↔ the GAE equations; `surr1/surr2` ↔ the clip; `_squashed_log_prob` ↔ the tanh correction; `entropy_coef` ↔ entropy bonus.
-
-**Checkpoint:** implement **REINFORCE**, then **vanilla PPO**, from scratch on CartPole and Pendulum. *Then* read `mappo_trainer.py` and `networks.py` and explain every line against your own implementation. This alone will make you genuinely dangerous.
+**Checkpoint:** the EKF fusing peer reports; plot the NIS sequence; verify it is χ²
+under no attack; watch it spike under spoof. *(Phase 0 already did the static version of
+this — mean 8.054 against an expected 8, KS p = 0.691.)*
 
 ---
 
-## Phase 3 — Multi-Agent RL
+## 2 — GNSS fundamentals & integrity monitoring ⭐
 
-**Why here:** SentryNet is 3 (soon 9) cooperating agents. MARL adds non-stationarity, credit assignment, and partial observability.
+**Why here:** the framing. Without the vocabulary, "swarm RAIM" doesn't land with the
+audience that actually cares about GNSS spoofing.
 
-**Core concepts:** Dec-POMDPs; the non-stationarity problem; **CTDE** (Centralized Training, Decentralized Execution); shared vs independent policies; centralized critics; value factorization (QMIX) vs policy-gradient MARL (MAPPO, MADDPG); the credit-assignment problem.
+**Core:** how a fix is computed (pseudoranges, trilateration, least squares, DOP); error
+sources; spoofing vs jamming vs meaconing; **RAIM** — residual-based fault detection,
+**protection levels**, integrity risk, P(missed detection) / P(false alert), ARAIM; the
+language of HMI, alert limits, time-to-alert.
 
-**Resources:** **Yu et al., *The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games* (2021)** — the MAPPO paper, read it closely. **Lowe et al., *MADDPG* (2017)** and **Rashid et al., *QMIX* (2018)** for contrast. **Oliehoek & Amato, *A Concise Introduction to Decentralized POMDPs*** (book) for the theory.
+**Resources:** **Kaplan & Hegarty, *Understanding GPS/GNSS*** (read selectively) ·
+**Todd Humphreys** (UT Austin Radionavigation Lab) on civilian spoofing · the **Stanford
+GPS Lab** RAIM/ARAIM publications (Blanch, Walter) · skim **ION GNSS+** proceedings as
+much for the venue's *style* as its content.
 
-**SentryNet tie-in:** [[MAPPO]], [[Observation and Action Spaces]]. The centralized critic (126-dim joint state) vs local policy (42-dim) is CTDE in the flesh. The "shared value across drones" wart in [[Known Bugs and Confounds]] is a credit-assignment subtlety — you'll understand it fully after this phase.
-
-**Checkpoint:** take your Phase-2 PPO and extend it to 2 cooperating agents with a centralized critic. Feel the non-stationarity.
-
----
-
-## Phase 4 — Drones: dynamics, control & state estimation
-
-**Why here:** to make it *realistic* and eventually *hardware-ready*, you must understand what the RL is actually commanding — and why raw thrust is the wrong abstraction.
-
-**Core concepts:** quadrotor rigid-body dynamics (6-DOF, thrust/torque, motor model); the **cascaded control stack** (position → velocity → attitude → motor); PID control; **state estimation** — Kalman filter → **Extended Kalman Filter (EKF)** — and **sensor fusion**; coordinate frames; domain randomization for **[[Sim-to-Real Transfer|sim-to-real]]**.
-
-**Resources:** **Thrun, Burgard, Fox, *Probabilistic Robotics*** — the canonical book for Kalman/EKF and sensor fusion (this underpins your whole trust-as-estimation angle). **Panerati et al., *Learning to Fly* (gym-pybullet-drones, 2021)** — the paper for the drone sim you literally vendored. Quadrotor dynamics + PID: any standard aerial-robotics course (e.g. the classic Coursera *Aerial Robotics* by Vijay Kumar).
-
-**SentryNet tie-in:** [[Environment - BorderEnv]] (`_MockPhysics`, `_to_thrust`, domain randomization), [[Sim-to-Real Transfer]], [[ADR-004 - Terrain Occlusion Only]]. The "output velocity setpoints, not thrust" fix is a direct consequence of understanding the cascaded stack.
-
-**Checkpoint:** derive a quadrotor's equations of motion; implement a **1-D Kalman filter** fusing two noisy sensors; implement a **PID hover** controller. The Kalman filter is the conceptual seed of plausibility trust.
+**Checkpoint:** express your own Test 2 results in Pmd/Pfa terms and state an operating
+point you would defend.
 
 ---
 
-## Phase 5 — Adversarial ML, security & robust estimation (your innovation) ⭐
+## 3 — UWB ranging & enough radio physics
 
-**Why here:** this is where the *novel contribution* lives — [[Plausibility-Based Trust]] under [[GPS Spoofing and GNSS Denial]].
+**Core:** two-way ranging, single- vs **double-sided TWR** (and why clock drift forces
+DS); TDoA; path loss and link budget; **NLoS positive range bias**.
 
-**Core concepts:** GNSS fundamentals and **GPS spoofing/jamming**; **trust & reputation** systems in networks; the **Byzantine Generals Problem** and Byzantine-fault-tolerant aggregation; **robust statistics** (median, trimmed mean, M-estimators, breakdown point); anomaly/outlier detection; the distinction between crypto (authentication) and physical-plausibility (integrity); multi-sensor fusion under attack.
+**The insight worth internalising:** blocked line-of-sight makes the signal travel
+*further*, so NLoS bias is strictly positive — and a spoofed position claim also produces
+a range/claim disagreement. **"Behind a hill" and "lying" are genuinely confusable**, and
+separating them is part of the research problem, not a nuisance. It couples
+[[ADR-004 - Terrain Occlusion Only]] directly to detection.
 
-**Resources:** **Lamport, Shostak, Pease, *The Byzantine Generals Problem* (1982)** — foundational. **Huber, *Robust Statistics*** (or a robust-stats survey for a gentler start). Todd Humphreys' body of work on **civilian GPS spoofing** (UT Austin) — the canonical academic source; search his talks/papers. For trust/reputation, read surveys on *trust management in multi-agent / sensor networks* (the field is broad — read 2–3 surveys rather than one paper).
+**Resources:** DW1000/DW3000 user manuals and Qorvo app notes (unusually practical) ·
+UWB localisation surveys · Bitcraze Loco documentation.
 
-**SentryNet tie-in:** [[Trust and Reputation]], [[Plausibility-Based Trust]], [[Robust Statistics and Consensus]], [[Adversarial Channel]], the ADRs [[ADR-001 - GPS-Spoofing Pivot]] / [[ADR-003 - Supervised Plausibility Trust]]. [[Robust Statistics and Consensus]] is *why* you're scaling to N=9.
-
-**Checkpoint:** implement trust-weighted mean, **median**, and **trimmed-mean** aggregation; inject a spoofed sensor and measure each estimator's **breakdown point** as you increase the number of liars. Then build a toy **kinematic-plausibility** detector. This is a direct dry-run of Stage 1.
-
----
-
-## Phase 6 — Experimental rigor & research craft ⭐
-
-**Why here:** this is the phase that would have *prevented most of your bugs*. Rigor is a skill, not an afterthought.
-
-**Core concepts:** reproducibility (seeds, determinism, environment pinning); the confound problem (why A/B/C must be identical except one variable); statistical testing (bootstrap CIs, Welch's t-test, effect sizes, multiple-comparison pitfalls); ceiling effects; ablations; reading and writing papers; honest reporting of negative results.
-
-**Resources:** **Henderson et al., *Deep Reinforcement Learning that Matters* (2018)** — read this early; it is *exactly* your seed-variance / reproducibility problem, documented. Andrew Ng's *Machine Learning Yearning* for experimental discipline. For paper-reading: Andrew Ng's "how to read papers" method (the three-pass approach).
-
-**SentryNet tie-in:** [[Controlled Experiment]], [[Metrics]], [[Does Trust Actually Help]], [[Known Bugs and Confounds]]. Your Stage-0 pipeline (`experiments/`) is applied Phase 6.
-
-**Checkpoint:** re-run a small experiment with 8 seeds; compute bootstrap CIs and a Welch t-test by hand (then check against `analyze_controlled.py`); design one ablation and predict its result before running it.
+**Ties to:** `sentrinet/sensing/uwb.py`.
 
 ---
 
-## A suggested 12-week sequence (adjust to your pace)
+## 4 — Detection theory
 
-| Weeks | Focus | Outcome |
+**Core:** ROC/AUC, operating points, Neyman–Pearson, likelihood-ratio tests;
+**CUSUM / SPRT** for sequential detection; calibration.
+
+**Why it matters here:** Test 2 showed single-epoch detection needs ~4σ of displacement.
+Anything subtler has to be caught by **accumulating evidence over time** — which is
+exactly what sequential detection is for, and what makes time-to-detect a meaningful
+metric. This is also the principled answer to the slow-drift attack (S2).
+
+**Resources:** **Kay, *Fundamentals of Statistical Signal Processing, Vol. II: Detection
+Theory*** (as a lookup, not cover-to-cover) · scikit-learn docs for the practical metrics.
+
+---
+
+## 5 — Resilient consensus & robust statistics
+
+**Core:** Byzantine fault tolerance; **r-robustness and (r,s)-robustness** of graphs;
+**W-MSR**; breakdown point; M-estimators; trimmed means; algebraic connectivity.
+
+**Why it matters here:** this is what makes the frontier a *theoretical* result rather
+than an empirical sweep — it tells you whether a sparse mobile mesh can tolerate *f*
+attackers at all.
+
+**Resources:** **LeBlanc, Zhang, Koutsoukos & Sundaram, *Resilient Asymptotic Consensus
+in Robust Networks* (2013)** — the r-robustness paper · Lamport, Shostak & Pease, *The
+Byzantine Generals Problem* (1982) · a robust-statistics survey.
+
+**Tooling:** `networkx`.
+
+**Checkpoint:** compute r-robustness of your actual mesh as swarm size and comms range
+vary — that is a figure in the paper.
+
+---
+
+## 6 — Stealthy attacks in cyber-physical systems
+
+**Why here:** the adaptive attacker. Almost all of this literature assumes a naive
+adversary; the question an evaluator asks within ninety seconds is *what if the attacker
+knows the detector exists?* There is an entire CPS-security literature on attacks that
+evade residual-based detectors — you don't have to invent it.
+
+**Resources:** **Mo & Sinopoli** on false-data injection in control systems ·
+**Pasqualetti, Dörfler & Bullo** on attack detection and identification in CPS ·
+Teixeira et al. on CPS attack models.
+
+**Ties to:** `sentrinet/attacks/adaptive.py`.
+
+---
+
+## 7 — Research packaging & craft
+
+**Core:** `pyproject.toml` + src layout; GitHub Actions CI; `pytest` discipline;
+**Hydra/OmegaConf** for YAML scenarios; DVC or git-LFS (the repo carries 431 MB of
+checkpoints and a 62 MB `.git`); IEEE LaTeX; reproducibility packaging.
+
+**Retained from the old roadmap:** **Henderson et al., *Deep Reinforcement Learning that
+Matters* (2018)** — still the best statement of the seed-variance and reproducibility
+problem this project has already lived through.
+
+---
+
+## Demoted (return for the phase-E ablation)
+
+RL foundations · deep RL / PPO+GAE · MARL and CTDE. You already have these. The old
+phase notes are preserved in git history if you want them back.
+
+---
+
+## Suggested sequence
+
+| Week | Learn | Build |
 |---|---|---|
-| 1–2 | Phase 1 (+ Phase 0 as needed) | Value iteration & Q-learning working |
-| 3–5 | **Phase 2** ⭐ | REINFORCE + PPO from scratch; can read all of `networks.py`/`mappo_trainer.py` |
-| 6–7 | Phase 3 | 2-agent CTDE PPO; understand the critic |
-| 8 | **Phase 6** ⭐ | Rigorous re-run with CIs; understand every Stage-0 bug |
-| 9–10 | Phase 5 ⭐ | Robust aggregators + a plausibility detector (previews Stage 1) |
-| 11–12 | Phase 4 | Kalman filter + PID + cascaded-control understanding for sim-to-real |
+| 1–2 | **Estimation ⭐** | EKF over peer reports + NIS validation |
+| 2–3 | GNSS + RAIM vocabulary *(parallel)* | Phase A: scripted pursuer |
+| 3–4 | UWB ranging, NLoS bias | Phase B: N=9, mesh, LoS, TWR |
+| 4–5 | Stealthy CPS attacks | Phase C: S0–S4 + adaptive attacker |
+| 5–6 | RAIM exclusion, robust stats | Phase D: classical baselines |
+| 6–7 | Detection theory, CUSUM/SPRT | Phase E: learned detector + ROC |
+| 7–8 | r-robustness | Phase F: frontier sweeps |
+| 10–12 | Packaging, IEEE LaTeX | Phase H: package + paper |
 
-## The meta-skill: learn by interrogating this project
+## The meta-skill
 
-The fastest deep learning available to you is already in this repo: for every **bug** in [[Known Bugs and Confounds]] and every **decision** in [[Decision Log]], make sure you understand it well enough to have caught/made it yourself. A project you can fully explain — including its mistakes — is worth more than ten tutorials.
+The fastest deep learning available is still in this repo: for every bug in
+[[Known Bugs and Confounds]] and every decision in [[Decision Log]], make sure you
+understand it well enough to have caught or made it yourself. That now includes
+[[ADR-011 - Pivot to Cooperative Integrity Monitoring]] — a project you can explain
+*including why it changed direction* is worth more than ten tutorials.
 
 ## Related
-- [[00 - START HERE]] · [[Glossary]] · [[Roadmap]] (the *project* roadmap, distinct from this *learning* roadmap)
+
+- [[00 - START HERE]] · [[Glossary]] · [[Roadmap]] · [[Decision Log]]

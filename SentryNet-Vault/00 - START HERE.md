@@ -2,16 +2,26 @@
 
 Your single place to understand this project end to end: the **theory**, the **code**, the **plan**, and the **decisions** behind every choice. Open this folder in Obsidian (`Open folder as vault`) and use the graph view — everything is interlinked.
 
-> **One-line project thesis:** Resilient cooperative target tracking under **GPS spoofing**, using **physics-based plausibility trust** — validated in a controlled sim study, packaged as a reusable benchmark, with a micro-drone sim-to-real path.
+> **One-line project thesis:** **Cooperative integrity monitoring for GNSS-denied drone
+> swarms** — detect and isolate a spoofed node from physics that cannot be forged,
+> packaged as a reusable benchmark. *(Reframed 2026-09-04; see
+> [[ADR-011 - Pivot to Cooperative Integrity Monitoring]].)*
 
 ---
 
 ## 🚦 Where the project stands right now
 
-- The original claim ("EMA trust beats no-trust under packet loss") **does not replicate** — see [[Does Trust Actually Help]].
-- There are **correctness bugs** that corrupt all existing results — see [[Known Bugs and Confounds]].
-- We have a **pivot + staged plan** approved in `docs/DESIGN.md` — see [[Roadmap]].
-- **Stage 0** (fix + honest baseline) is where execution begins.
+- **v3, phase 0** — the premise test. Canonical plan: `docs/DESIGN-v3.md`; summary in
+  [[Roadmap]]. Branch `sentrinet-v3-integrity`; v2 frozen on `sentrinet-v2-stage0`.
+- The original claim ("EMA trust beats no-trust under packet loss") **does not
+  replicate** — see [[Does Trust Actually Help]]. v3 supplies the *structural* reason:
+  at N=3 a perfectly consistent lie always exists, so the problem was unsolvable rather
+  than badly implemented.
+- **ADR-005 → 010 made the v2 testbed learn** (~44% capture, 3 seeds × 1M steps) — and
+  in doing so proved the RL is not the path on this hardware. That work is frozen, not
+  discarded.
+- Phase 0 has already validated the core statistic: the per-node χ² test is exactly
+  chi-squared (mean 8.054 vs 8, KS p = 0.691).
 
 ## 🧭 How to navigate
 
