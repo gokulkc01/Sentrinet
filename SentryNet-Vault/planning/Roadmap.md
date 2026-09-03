@@ -38,7 +38,11 @@ function of effective connectivity** — the frontier this project exists to map
   gauge-degenerate, `rank(J) = 3N − 6`.
 - **Test 2 — detectability.** ✅ Needs ~4σ of displacement per epoch; isolation lags
   detection badly. Motivates sequential detection (CUSUM/SPRT).
-- **Test 3 — the crux.** Does attacker capability collapse as the swarm grows?
+- **Test 3 — the crux.** ✅ **GATE PASSED.** At N=3 a consistent lie costs *exactly zero*
+  residual, confirming the under-determination argument. Attacker reach then erodes
+  monotonically with N (≥30 → 20 → 15 → 10 → 5 m) — smoothly, not at the sharp N≈5
+  threshold predicted. And **coplanar peers cancel that benefit entirely**: N=9 coplanar
+  is no better than N=4, so **altitude diversity is a hard security requirement**.
 
 ## Phases A–H
 

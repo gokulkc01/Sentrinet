@@ -1,0 +1,61 @@
+geometry,n_nodes,peers,displacement_m,median_rms_residual_m,below_noise_floor
+3-D (altitude spread 15 m),3,2,2.0,0.47192344804549113,True
+3-D (altitude spread 15 m),3,2,5.0,2.856293337471833e-07,True
+3-D (altitude spread 15 m),3,2,10.0,4.676396863382509e-07,True
+3-D (altitude spread 15 m),3,2,15.0,7.864732775202868e-07,True
+3-D (altitude spread 15 m),3,2,20.0,1.180523456024186e-06,True
+3-D (altitude spread 15 m),3,2,30.0,1.046621751533875,True
+3-D (altitude spread 15 m),4,3,2.0,0.7491604933903631,True
+3-D (altitude spread 15 m),4,3,5.0,0.6687862012339761,True
+3-D (altitude spread 15 m),4,3,10.0,0.8908034715676387,True
+3-D (altitude spread 15 m),4,3,15.0,1.474583802667305,True
+3-D (altitude spread 15 m),4,3,20.0,1.99186514995466,True
+3-D (altitude spread 15 m),4,3,30.0,4.850076990293228,False
+3-D (altitude spread 15 m),5,4,2.0,0.8948563358635158,True
+3-D (altitude spread 15 m),5,4,5.0,0.7821959561494343,True
+3-D (altitude spread 15 m),5,4,10.0,1.23806001929976,True
+3-D (altitude spread 15 m),5,4,15.0,2.01693932879695,True
+3-D (altitude spread 15 m),5,4,20.0,3.3427019026331806,False
+3-D (altitude spread 15 m),5,4,30.0,7.2929278638490995,False
+3-D (altitude spread 15 m),7,6,2.0,1.0889740863129576,True
+3-D (altitude spread 15 m),7,6,5.0,1.3328667912078513,True
+3-D (altitude spread 15 m),7,6,10.0,2.1213020293326874,True
+3-D (altitude spread 15 m),7,6,15.0,3.145651551750167,False
+3-D (altitude spread 15 m),7,6,20.0,4.496332973806634,False
+3-D (altitude spread 15 m),7,6,30.0,9.214576995051239,False
+3-D (altitude spread 15 m),9,8,2.0,1.0177453340112779,True
+3-D (altitude spread 15 m),9,8,5.0,1.3358067257695447,True
+3-D (altitude spread 15 m),9,8,10.0,2.258572646702265,False
+3-D (altitude spread 15 m),9,8,15.0,3.354342549791677,False
+3-D (altitude spread 15 m),9,8,20.0,4.844735917732236,False
+3-D (altitude spread 15 m),9,8,30.0,9.692484795131017,False
+"peers coplanar, attacker off-plane",3,2,2.0,0.04014185498199671,True
+"peers coplanar, attacker off-plane",3,2,5.0,5.393644672995979e-07,True
+"peers coplanar, attacker off-plane",3,2,10.0,8.1323261259892e-07,True
+"peers coplanar, attacker off-plane",3,2,15.0,9.643643523396004e-07,True
+"peers coplanar, attacker off-plane",3,2,20.0,8.346643449649396e-07,True
+"peers coplanar, attacker off-plane",3,2,30.0,0.7282357530153072,True
+"peers coplanar, attacker off-plane",4,3,2.0,0.7250225743039809,True
+"peers coplanar, attacker off-plane",4,3,5.0,0.44784917509456557,True
+"peers coplanar, attacker off-plane",4,3,10.0,0.6866028998282419,True
+"peers coplanar, attacker off-plane",4,3,15.0,0.9583029084643431,True
+"peers coplanar, attacker off-plane",4,3,20.0,0.6525910516146124,True
+"peers coplanar, attacker off-plane",4,3,30.0,2.132695950540926,False
+"peers coplanar, attacker off-plane",5,4,2.0,0.8126090304713223,True
+"peers coplanar, attacker off-plane",5,4,5.0,0.9349022561986692,True
+"peers coplanar, attacker off-plane",5,4,10.0,1.353063746106205,True
+"peers coplanar, attacker off-plane",5,4,15.0,1.4410851710545063,True
+"peers coplanar, attacker off-plane",5,4,20.0,1.2029817509672545,True
+"peers coplanar, attacker off-plane",5,4,30.0,2.3124405045620717,False
+"peers coplanar, attacker off-plane",7,6,2.0,0.9294760293892719,True
+"peers coplanar, attacker off-plane",7,6,5.0,1.1272796231032176,True
+"peers coplanar, attacker off-plane",7,6,10.0,2.039971231538694,True
+"peers coplanar, attacker off-plane",7,6,15.0,2.2383667770137916,False
+"peers coplanar, attacker off-plane",7,6,20.0,1.4224420705355103,True
+"peers coplanar, attacker off-plane",7,6,30.0,3.1270419776274316,False
+"peers coplanar, attacker off-plane",9,8,2.0,1.1085702079660913,True
+"peers coplanar, attacker off-plane",9,8,5.0,1.3898732820775028,True
+"peers coplanar, attacker off-plane",9,8,10.0,2.001760076442422,True
+"peers coplanar, attacker off-plane",9,8,15.0,2.11869700739018,True
+"peers coplanar, attacker off-plane",9,8,20.0,1.5652813752821644,True
+"peers coplanar, attacker off-plane",9,8,30.0,2.5824070328440576,False

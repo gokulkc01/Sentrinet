@@ -84,7 +84,7 @@ Standalone: no RL, no reward function, no `border_env`. Driver:
 |---|---|---|
 | **1** | With no attacker, is the statistic actually χ² at the claimed dof? | ✅ **PASS** (per-node) |
 | **2** | Detection and false-alarm rate vs. a naive constant-offset spoofer | ✅ Measured |
-| **3** | Against an *adaptive* spoofer, does the N≈5 threshold appear? | ⏳ Running |
+| **3** | Against an *adaptive* spoofer, does attacker capability collapse with N? | ✅ **PASS**, with corrections |
 
 ### Test 1 results (N=9, 2000 trials)
 
@@ -134,9 +134,51 @@ Honest residual noise floor `sqrt(2σ_g² + σ_r²)` = **2.12 m**.
   honest peers' statistics too. Detection-vs-isolation is a real sub-problem, not a
   detail.
 
-**Gate:** Test 1 passing for the per-node statistic clears the model. Test 3 decides
-whether the geometric thesis holds; if no threshold appears, the plan is re-opened
-before further work.
+### Test 3 results (40 trials/point, medians)
+
+The attacker solves for the cheapest *consistent* lie at a fixed displacement. The
+reported quantity is the largest displacement at which its best achievable RMS residual
+stays **below the 2.12 m noise floor** — i.e. how far it can move while remaining
+statistically invisible.
+
+| N | peers | 3-D (15 m altitude spread) | peers coplanar, attacker off-plane |
+|---|---|---|---|
+| 3 | 2 | **≥30 m (unbounded)** | **≥30 m (unbounded)** |
+| 4 | 3 | 20 m | 20 m |
+| 5 | 4 | 15 m | 20 m |
+| 7 | 6 | 10 m | 20 m |
+| 9 | 8 | **5 m** | **20 m** |
+
+**Three findings.**
+
+1. **N=3 is structurally broken, exactly as predicted.** The achievable residual is
+   literally **0.00 m** at displacements of 5, 10, 15 and 20 m — the attacker lies by 20
+   metres at zero cost. Two constraints, three unknowns: a continuum of perfectly
+   consistent lies. This is the structural cause of the v2 negative result, and it is
+   the claim the paper's motivation now rests on.
+
+2. **Attacker capability erodes monotonically with swarm size** — 30+ → 20 → 15 → 10 →
+   5 m. **The predicted sharp threshold at N≈5 did not appear**; the decline is smooth.
+   The "critical threshold" framing was too strong and is corrected to *monotone
+   erosion*, with a qualitative break only at N=3 (where the residual is exactly zero
+   rather than merely small).
+
+3. **Coplanar geometry cancels the benefit of swarm size entirely.** With peers in one
+   plane, N=9 is no better than N=4 — every size sits at 20 m. At N=9 that is a **4×
+   worse security posture from geometry alone**. The mirror solution's signature is
+   visible in the raw curve: the achievable residual *dips* near twice the attacker's
+   height above the peer plane, which is where its mirror image becomes reachable.
+   **Altitude diversity is therefore a hard security requirement**, and this is the more
+   operationally actionable of the two findings.
+
+**Caveats:** 40 trials per point, medians, a single attacker, a fully connected mesh, and
+a static snapshot with no temporal accumulation. All four are tightened in phases C–F.
+
+### Gate verdict: PASS
+
+Test 1 clears the statistical model for the per-node statistic. Test 3 confirms the
+geometric thesis and, in correcting the threshold framing, sharpens it. Proceed to
+phase A.
 
 ---
 

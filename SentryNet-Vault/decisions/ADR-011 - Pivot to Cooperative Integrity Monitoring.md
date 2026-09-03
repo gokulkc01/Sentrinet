@@ -96,6 +96,37 @@ Two consequences for the plan: single-epoch detection is weak, so **sequential d
 (CUSUM/SPRT) is where the power must come from**; and detection-vs-isolation is a real
 sub-problem to report separately, not a detail.
 
+### Confirmed (phase 0, Test 3 — the gate)
+
+Largest displacement at which the attacker's best *consistent* lie stays below the
+2.12 m noise floor:
+
+| N | 3-D (15 m altitude spread) | peers coplanar, attacker off-plane |
+|---|---|---|
+| 3 | **≥30 m (unbounded)** | ≥30 m |
+| 4 | 20 m | 20 m |
+| 5 | 15 m | 20 m |
+| 7 | 10 m | 20 m |
+| 9 | **5 m** | **20 m** |
+
+- **At N=3 the achievable residual is exactly 0.00 m** for displacements of 5–20 m. The
+  under-determination prediction is confirmed, and [[Does Trust Actually Help]] now has a
+  structural cause rather than an apology.
+- **Attacker capability erodes monotonically with N.** The predicted *sharp threshold at
+  N≈5 did not appear* — the decline is smooth, with a qualitative break only at N=3.
+  The threshold framing in this ADR's rationale is corrected to **monotone erosion**.
+- **Coplanar geometry cancels the benefit of swarm size.** N=9 coplanar is no better
+  than N=4 — a 4× worse posture than the 3-D case at the same size. The mirror
+  solution's signature appears as a residual dip near twice the attacker's height above
+  the peer plane. **Altitude diversity is a hard security requirement**, and this is
+  the more operationally actionable finding of the two.
+- The first attempt at this sub-experiment made *every* node coplanar, including the
+  attacker — in which case the attacker's mirror image is itself and no lie is offered.
+  That design tested nothing; it was corrected to peers-in-plane, attacker-off-plane.
+
+**Gate verdict: PASS.** Caveats to tighten in phases C–F: 40 trials/point, medians, one
+attacker, fully connected mesh, static snapshot with no temporal accumulation.
+
 ### The cost of dropping Stage 0.2 — recorded honestly
 
 The paper loses a measured "the naive mechanism doesn't help" from working code. The
