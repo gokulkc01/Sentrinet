@@ -219,6 +219,7 @@ def sim_loop(policy, args):
         p_drop=args.p_drop, p_spoof=args.p_spoof,
         use_trust=args.use_trust, capture_mode=args.capture_mode,
         sustained_steps=args.sustained_steps, capture_k=args.capture_k,
+        intruder_profile=getattr(args, 'intruder_profile', 'evasive'),
         seed=args.seed,
     )
     obs, _ = env.reset()
@@ -573,6 +574,8 @@ def main():
                         help="Also open PyBullet 3D window (synced with dashboard)")
     parser.add_argument("--speed", type=float, default=0.02,
                         help="Sim sleep per step in seconds (0.02=50Hz)")
+    parser.add_argument("--intruder-profile", choices=["passive", "evasive", "reactive"], default="evasive",
+                        help="Set the intelligence profile of the intruder drone")
     args = parser.parse_args()
 
     policy = load_policy(args.checkpoint)
