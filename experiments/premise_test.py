@@ -25,6 +25,7 @@ Usage:
     python -m experiments.premise_test              # all three
     python -m experiments.premise_test --test 3     # just the crux
 """
+
 from __future__ import annotations
 
 import argparse
@@ -57,7 +58,7 @@ UWB = UwbModel(sigma=0.10)
 
 def noise_floor(gnss: GnssModel = GNSS, uwb: UwbModel = UWB) -> float:
     """Std of a single honest residual: sqrt(2 sigma_g^2 + sigma_r^2), in metres."""
-    return float(np.sqrt(2.0 * gnss.sigma ** 2 + uwb.sigma ** 2))
+    return float(np.sqrt(2.0 * gnss.sigma**2 + uwb.sigma**2))
 
 
 def _one_epoch(n_nodes, rng, attacker=None, offset=None, altitude_spread=15.0):
@@ -88,7 +89,7 @@ def test1_model_validity(n_nodes: int, trials: int, seed: int) -> pd.DataFrame:
         full.append(global_nis(resid, cov)[0])
         truncated.append(global_nis(resid, cov, rank=rank)[0])
         # Control: pretend residuals are independent with the pairwise variance.
-        naive.append(float(np.sum(resid ** 2) / noise_floor() ** 2))
+        naive.append(float(np.sum(resid**2) / noise_floor() ** 2))
         nis_k, _ = per_node_nis(resid, cov, links, n_nodes)
         per_node.append(nis_k[0])
 
@@ -99,36 +100,56 @@ def test1_model_validity(n_nodes: int, trials: int, seed: int) -> pd.DataFrame:
     dof_node = n_nodes - 1
 
     rows = [
-        dict(model="per-node (full covariance)", dof=dof_node,
-             mean=per_node.mean(), expected_mean=dof_node,
-             ks_p=float(stats.kstest(per_node, "chi2", args=(dof_node,)).pvalue)),
-        dict(model="global, rank-truncated", dof=rank,
-             mean=truncated.mean(), expected_mean=rank,
-             ks_p=float(stats.kstest(truncated, "chi2", args=(rank,)).pvalue)),
-        dict(model="global, naive dof (control)", dof=n_links,
-             mean=full.mean(), expected_mean=n_links,
-             ks_p=float(stats.kstest(full, "chi2", args=(n_links,)).pvalue)),
-        dict(model="independence (control)", dof=n_links,
-             mean=naive.mean(), expected_mean=n_links,
-             ks_p=float(stats.kstest(naive, "chi2", args=(n_links,)).pvalue)),
+        dict(
+            model="per-node (full covariance)",
+            dof=dof_node,
+            mean=per_node.mean(),
+            expected_mean=dof_node,
+            ks_p=float(stats.kstest(per_node, "chi2", args=(dof_node,)).pvalue),
+        ),
+        dict(
+            model="global, rank-truncated",
+            dof=rank,
+            mean=truncated.mean(),
+            expected_mean=rank,
+            ks_p=float(stats.kstest(truncated, "chi2", args=(rank,)).pvalue),
+        ),
+        dict(
+            model="global, naive dof (control)",
+            dof=n_links,
+            mean=full.mean(),
+            expected_mean=n_links,
+            ks_p=float(stats.kstest(full, "chi2", args=(n_links,)).pvalue),
+        ),
+        dict(
+            model="independence (control)",
+            dof=n_links,
+            mean=naive.mean(),
+            expected_mean=n_links,
+            ks_p=float(stats.kstest(naive, "chi2", args=(n_links,)).pvalue),
+        ),
     ]
     df = pd.DataFrame(rows)
-    print("\n=== TEST 1 - model validity "
-          "(N={}, {} trials) ===".format(n_nodes, trials))
-    print(df.to_string(index=False, float_format=lambda v: "{:.4g}".format(v)))
+    print(f"\n=== TEST 1 - model validity (N={n_nodes}, {trials} trials) ===")
+    print(df.to_string(index=False, float_format=lambda v: f"{v:.4g}"))
     ok = df.loc[0, "ks_p"] > 0.01
-    verdict = ("PASS - the attribution statistic is chi-squared" if ok
-               else "FAIL - the covariance model is wrong")
+    verdict = (
+        "PASS - the attribution statistic is chi-squared"
+        if ok
+        else "FAIL - the covariance model is wrong"
+    )
     print("\n  per-node KS p        = {:.3g} -> {}".format(df.loc[0, "ks_p"], verdict))
     print("  rank-truncated KS p  = {:.3g}".format(df.loc[1, "ks_p"]))
-    print("  controls (both expected to fail): naive dof {:.3g}, "
-          "independence {:.3g}".format(df.loc[2, "ks_p"], df.loc[3, "ks_p"]))
+    print(
+        "  controls (both expected to fail): naive dof {:.3g}, independence {:.3g}".format(
+            df.loc[2, "ks_p"], df.loc[3, "ks_p"]
+        )
+    )
     return df
 
 
 # -- Test 2 -------------------------------------------------------------------
-def test2_detectability(n_nodes: int, trials: int, seed: int,
-                        alpha: float = 1e-3) -> pd.DataFrame:
+def test2_detectability(n_nodes: int, trials: int, seed: int, alpha: float = 1e-3) -> pd.DataFrame:
     rng = np.random.default_rng(seed + 1)
     offsets = np.array([0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0])
     rows = []
@@ -139,7 +160,9 @@ def test2_detectability(n_nodes: int, trials: int, seed: int,
             direction = rng.normal(size=3)
             direction /= np.linalg.norm(direction)
             links, _, _, _, resid, cov, _ = _one_epoch(
-                n_nodes, rng, attacker=attacker,
+                n_nodes,
+                rng,
+                attacker=attacker,
                 offset=(mag * direction) if attacker is not None else None,
             )
             accused, _ = isolate_node(resid, cov, links, n_nodes, alpha=alpha)
@@ -148,23 +171,23 @@ def test2_detectability(n_nodes: int, trials: int, seed: int,
             else:
                 detected += int(accused is not None)
                 correct_id += int(accused == attacker)
-        rows.append(dict(
-            offset_m=float(mag),
-            detection_rate=(detected / trials) if mag > 0 else np.nan,
-            correct_isolation=(correct_id / trials) if mag > 0 else np.nan,
-            false_alarm_rate=(false_alarm / trials) if mag == 0 else np.nan,
-        ))
+        rows.append(
+            dict(
+                offset_m=float(mag),
+                detection_rate=(detected / trials) if mag > 0 else np.nan,
+                correct_isolation=(correct_id / trials) if mag > 0 else np.nan,
+                false_alarm_rate=(false_alarm / trials) if mag == 0 else np.nan,
+            )
+        )
     df = pd.DataFrame(rows)
-    print("\n=== TEST 2 - detectability (N={}, {} trials/point, alpha={}) ==="
-          .format(n_nodes, trials, alpha))
-    print("  honest residual noise floor: {:.2f} m".format(noise_floor()))
-    print(df.to_string(index=False, float_format=lambda v: "{:.3f}".format(v)))
+    print(f"\n=== TEST 2 - detectability (N={n_nodes}, {trials} trials/point, alpha={alpha}) ===")
+    print(f"  honest residual noise floor: {noise_floor():.2f} m")
+    print(df.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     return df
 
 
 # -- Test 3 -------------------------------------------------------------------
-def test3_adaptive_threshold(trials: int, seed: int,
-                             node_counts=(3, 4, 5, 7, 9)) -> pd.DataFrame:
+def test3_adaptive_threshold(trials: int, seed: int, node_counts=(3, 4, 5, 7, 9)) -> pd.DataFrame:
     rng = np.random.default_rng(seed + 2)
     displacements = np.array([2.0, 5.0, 10.0, 15.0, 20.0, 30.0])
     floor = noise_floor()
@@ -193,33 +216,40 @@ def test3_adaptive_threshold(trials: int, seed: int,
                 claims = broadcast_claims(truth, GNSS, rng)
                 ranges = measure_ranges(truth, links, UWB, rng)
                 peer_idx = [k for k in range(n_nodes) if k != attacker]
-                peer_ranges = np.array([
-                    ranges[m] for m, (i, j) in enumerate(links)
-                    if attacker in (i, j)
-                ])
-                curves.append(attack_margin_curve(
-                    truth[attacker], claims[peer_idx], peer_ranges,
-                    displacements, n_dirs=256,
-                ))
+                peer_ranges = np.array(
+                    [ranges[m] for m, (i, j) in enumerate(links) if attacker in (i, j)]
+                )
+                curves.append(
+                    attack_margin_curve(
+                        truth[attacker],
+                        claims[peer_idx],
+                        peer_ranges,
+                        displacements,
+                        n_dirs=256,
+                    )
+                )
             curves = np.asarray(curves)
             for c, d in enumerate(displacements):
                 med = float(np.median(curves[:, c]))
-                rows.append(dict(
-                    geometry=label, n_nodes=n_nodes, peers=n_nodes - 1,
-                    displacement_m=float(d), median_rms_residual_m=med,
-                    below_noise_floor=bool(med < floor),
-                ))
+                rows.append(
+                    dict(
+                        geometry=label,
+                        n_nodes=n_nodes,
+                        peers=n_nodes - 1,
+                        displacement_m=float(d),
+                        median_rms_residual_m=med,
+                        below_noise_floor=bool(med < floor),
+                    )
+                )
     df = pd.DataFrame(rows)
-    print("\n=== TEST 3 - adaptive attacker ({} trials/point) ===".format(trials))
-    print("  honest residual noise floor: {:.2f} m".format(floor))
+    print(f"\n=== TEST 3 - adaptive attacker ({trials} trials/point) ===")
+    print(f"  honest residual noise floor: {floor:.2f} m")
     print("  'below_noise_floor' = the attacker is statistically invisible.\n")
     for label in df["geometry"].unique():
         sub = df[df["geometry"] == label]
-        piv = sub.pivot(index="n_nodes", columns="displacement_m",
-                        values="median_rms_residual_m")
-        print("  --- {} --- median achievable RMS residual (m) vs displacement"
-              .format(label))
-        print(piv.to_string(float_format=lambda v: "{:.2f}".format(v)))
+        piv = sub.pivot(index="n_nodes", columns="displacement_m", values="median_rms_residual_m")
+        print(f"  --- {label} --- median achievable RMS residual (m) vs displacement")
+        print(piv.to_string(float_format=lambda v: f"{v:.2f}"))
         # The security-relevant quantity is not *whether* some lie is invisible
         # (a 2 m lie always is, and hardly matters) but how far the attacker can
         # move while staying under the noise floor.
@@ -229,18 +259,23 @@ def test3_adaptive_threshold(trials: int, seed: int,
             invisible = row[row.median_rms_residual_m < floor]["displacement_m"]
             worst = float(invisible.max()) if len(invisible) else 0.0
             unbounded = len(invisible) == len(row)
-            print("    N={:<2d} -> {}".format(
-                int(n_nodes),
-                ">= {:.0f} m (unbounded in tested range)".format(worst)
-                if unbounded else "{:.0f} m".format(worst)))
+            print(
+                "    N={:<2d} -> {}".format(
+                    int(n_nodes),
+                    f">= {worst:.0f} m (unbounded in tested range)"
+                    if unbounded
+                    else f"{worst:.0f} m",
+                )
+            )
         print("")
     return df
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Phase 0 premise test")
-    ap.add_argument("--test", type=int, choices=[1, 2, 3], default=None,
-                    help="run only one test (default: all)")
+    ap.add_argument(
+        "--test", type=int, choices=[1, 2, 3], default=None, help="run only one test (default: all)"
+    )
     ap.add_argument("--nodes", type=int, default=9)
     ap.add_argument("--trials", type=int, default=2000)
     ap.add_argument("--adaptive-trials", type=int, default=40)
@@ -252,15 +287,18 @@ def main() -> None:
 
     if 1 in run:
         test1_model_validity(args.nodes, args.trials, args.seed).to_csv(
-            OUT_DIR / "test1_model_validity.csv", index=False)
+            OUT_DIR / "test1_model_validity.csv", index=False
+        )
     if 2 in run:
         test2_detectability(args.nodes, max(200, args.trials // 4), args.seed).to_csv(
-            OUT_DIR / "test2_detectability.csv", index=False)
+            OUT_DIR / "test2_detectability.csv", index=False
+        )
     if 3 in run:
         test3_adaptive_threshold(args.adaptive_trials, args.seed).to_csv(
-            OUT_DIR / "test3_adaptive_threshold.csv", index=False)
+            OUT_DIR / "test3_adaptive_threshold.csv", index=False
+        )
 
-    print("\nCSVs written to {}/".format(OUT_DIR))
+    print(f"\nCSVs written to {OUT_DIR}/")
 
 
 if __name__ == "__main__":

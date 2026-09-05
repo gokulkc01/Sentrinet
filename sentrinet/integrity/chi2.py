@@ -16,14 +16,13 @@ participates in, so its honest peers' statistics inflate too. `isolate_node`
 therefore attributes to the node with the largest normalised statistic rather
 than flagging everything above threshold.
 """
-from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from __future__ import annotations
 
 import numpy as np
 from scipy import stats
 
-Link = Tuple[int, int]
+Link = tuple[int, int]
 
 
 def _quadratic_form(residual: np.ndarray, covariance: np.ndarray) -> float:
@@ -35,8 +34,8 @@ def _quadratic_form(residual: np.ndarray, covariance: np.ndarray) -> float:
 def global_nis(
     residual: np.ndarray,
     covariance: np.ndarray,
-    rank: Optional[int] = None,
-) -> Tuple[float, int]:
+    rank: int | None = None,
+) -> tuple[float, int]:
     """
     Whole-network statistic and its degrees of freedom.
 
@@ -65,15 +64,15 @@ def global_nis(
     eigvals, eigvecs = np.linalg.eigh(covariance)
     order = np.argsort(eigvals)[::-1][:rank]
     projected = eigvecs[:, order].T @ residual
-    return float(np.sum(projected ** 2 / eigvals[order])), int(rank)
+    return float(np.sum(projected**2 / eigvals[order])), int(rank)
 
 
 def per_node_nis(
     residual: np.ndarray,
     covariance: np.ndarray,
-    links: List[Link],
+    links: list[Link],
     n_nodes: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Per-node statistic using only the residuals incident to each node.
 
@@ -113,10 +112,10 @@ def threshold(dof: int, alpha: float = 1e-3) -> float:
 def isolate_node(
     residual: np.ndarray,
     covariance: np.ndarray,
-    links: List[Link],
+    links: list[Link],
     n_nodes: int,
     alpha: float = 1e-3,
-) -> Tuple[Optional[int], np.ndarray]:
+) -> tuple[int | None, np.ndarray]:
     """
     Flag the most anomalous node, or None if the network looks clean.
 

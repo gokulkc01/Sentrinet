@@ -1,4 +1,5 @@
 """Threat models, from naive offsets to constraint-aware spoofing."""
+
 from sentrinet.attacks.adaptive import (
     attack_margin_curve,
     best_lie_at_displacement,

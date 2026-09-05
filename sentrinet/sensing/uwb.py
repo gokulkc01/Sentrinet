@@ -12,16 +12,16 @@ disagreement, so "this node is behind a hill" and "this node is lying" are
 genuinely confusable. Separating them is part of the research problem, not a
 nuisance to engineer away.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 import numpy as np
 
 from sentrinet.world.geometry import true_ranges
 
-Link = Tuple[int, int]
+Link = tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -40,10 +40,10 @@ class UwbModel:
 
 def measure_ranges(
     true_positions: np.ndarray,
-    links: List[Link],
+    links: list[Link],
     model: UwbModel,
     rng: np.random.Generator,
-    nlos_mask: Optional[np.ndarray] = None,
+    nlos_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Measured range per link, shape (n_links,).

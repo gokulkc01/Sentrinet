@@ -1,14 +1,16 @@
 import csv
-from pathlib import Path
 import math
+from pathlib import Path
+
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
 def read_csv(path):
     rows = []
-    with open(path, 'r', newline='') as f:
+    with open(path, newline='') as f:
         reader = csv.DictReader(f)
         for r in reader:
             # convert numeric fields

@@ -1,6 +1,8 @@
 import sys
-import torch
 from pathlib import Path
+
+import torch
+
 p = Path(sys.argv[1])
 ck = torch.load(p, map_location='cpu')
 print('PATH:', p)

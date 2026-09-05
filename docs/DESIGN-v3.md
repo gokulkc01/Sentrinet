@@ -184,7 +184,7 @@ product more deployable, not less.
 | Phase | Work | Status |
 |---|---|---|
 | **0** | Premise test — validate the statistic and the geometry | ✅ Passed |
-| **A** | Scripted controller; detector decoupled from RL; capture rate retired | Next |
+| **A** | **Formation-flight scenarios** (show-like waypoint patterns, velocity/acceleration limited); detector decoupled from RL; the pursuit task and capture rate retired outright | Next |
 | **B** | **Realism**: `gym-pybullet-drones` dynamics, N=9, mesh, LoS occlusion, DS-TWR ranging with NLoS bias, **temporally correlated GNSS error** | ~2 wk |
 | **C** | Threat + fault model: spoofing scenarios *and* RTK dropout, multipath, sensor fault. Includes the rigid common-mode case | ~1 wk |
 | **D** | Established baselines: χ² FDE, trimmed mean, W-MSR, anchor-rooted MDS+RANSAC, the v1 EMA module | ~1 wk |

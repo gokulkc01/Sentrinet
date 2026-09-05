@@ -29,27 +29,24 @@ Note that with metre-scale GNSS noise and centimetre-scale ranging noise, the
 sigma_g term dominates: detection power is set by how badly the *claims* are
 known, not by the radio. The radio's job is to be trustworthy, not precise.
 """
-from __future__ import annotations
 
-from typing import List, Tuple
+from __future__ import annotations
 
 import numpy as np
 
-Link = Tuple[int, int]
+Link = tuple[int, int]
 
 
 def residual_vector(
-    claimed: np.ndarray, measured_ranges: np.ndarray, links: List[Link]
+    claimed: np.ndarray, measured_ranges: np.ndarray, links: list[Link]
 ) -> np.ndarray:
     """Claim-implied distance minus measured range, shape (n_links,)."""
     claimed = np.asarray(claimed, dtype=float)
-    implied = np.array(
-        [np.linalg.norm(claimed[i] - claimed[j]) for i, j in links], dtype=float
-    )
+    implied = np.array([np.linalg.norm(claimed[i] - claimed[j]) for i, j in links], dtype=float)
     return implied - np.asarray(measured_ranges, dtype=float)
 
 
-def residual_jacobian(claimed: np.ndarray, links: List[Link]) -> np.ndarray:
+def residual_jacobian(claimed: np.ndarray, links: list[Link]) -> np.ndarray:
     """
     d r / d (claimed coordinates), shape (n_links, 3 * n_nodes).
 
@@ -71,9 +68,7 @@ def residual_jacobian(claimed: np.ndarray, links: List[Link]) -> np.ndarray:
     return jac
 
 
-def residual_covariance(
-    jacobian: np.ndarray, sigma_gnss: float, sigma_range: float
-) -> np.ndarray:
+def residual_covariance(jacobian: np.ndarray, sigma_gnss: float, sigma_range: float) -> np.ndarray:
     """
     S = sigma_g^2 J J^T + sigma_r^2 I, shape (n_links, n_links).
 
@@ -81,6 +76,4 @@ def residual_covariance(
     normalised statistic chi-squared instead of merely chi-squared-shaped.
     """
     n_links = jacobian.shape[0]
-    return (sigma_gnss ** 2) * (jacobian @ jacobian.T) + (
-        sigma_range ** 2
-    ) * np.eye(n_links)
+    return (sigma_gnss**2) * (jacobian @ jacobian.T) + (sigma_range**2) * np.eye(n_links)

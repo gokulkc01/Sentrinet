@@ -9,16 +9,15 @@ preserves a consistent lie no matter how many nodes it has*. Drones cruising at
 a common altitude are very nearly coplanar, which makes altitude diversity a
 security property, not an aesthetic one.
 """
-from __future__ import annotations
 
-from typing import List, Tuple
+from __future__ import annotations
 
 import numpy as np
 
-Link = Tuple[int, int]
+Link = tuple[int, int]
 
 
-def link_list(n_nodes: int) -> List[Link]:
+def link_list(n_nodes: int) -> list[Link]:
     """All undirected pairs (i, j), i < j — a fully connected mesh."""
     return [(i, j) for i in range(n_nodes) for j in range(i + 1, n_nodes)]
 
@@ -52,7 +51,7 @@ def random_formation(
         raise ValueError("need at least 2 nodes")
 
     half = 0.5 * extent
-    pts: List[np.ndarray] = []
+    pts: list[np.ndarray] = []
     tries = 0
     while len(pts) < n_nodes:
         tries += 1
@@ -62,7 +61,8 @@ def random_formation(
                 f"{min_separation} in extent={extent}; loosen the constraints"
             )
         z = altitude_centre + (
-            0.0 if altitude_spread == 0.0
+            0.0
+            if altitude_spread == 0.0
             else rng.uniform(-0.5 * altitude_spread, 0.5 * altitude_spread)
         )
         cand = np.array([rng.uniform(-half, half), rng.uniform(-half, half), z])
@@ -71,7 +71,7 @@ def random_formation(
     return np.asarray(pts, dtype=float)
 
 
-def true_ranges(positions: np.ndarray, links: List[Link]) -> np.ndarray:
+def true_ranges(positions: np.ndarray, links: list[Link]) -> np.ndarray:
     """Noise-free Euclidean distance for each link, shape (n_links,)."""
     return np.array(
         [np.linalg.norm(positions[i] - positions[j]) for i, j in links],

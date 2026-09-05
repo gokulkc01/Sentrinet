@@ -24,17 +24,14 @@ whether the attacker can get its residuals **under the noise floor**, since
 anything below that is indistinguishable from honest GNSS error. That is what
 `attack_margin_curve` measures.
 """
-from __future__ import annotations
 
-from typing import Optional, Tuple
+from __future__ import annotations
 
 import numpy as np
 from scipy.optimize import minimize
 
 
-def consistency_cost(
-    claim: np.ndarray, peer_claims: np.ndarray, peer_ranges: np.ndarray
-) -> float:
+def consistency_cost(claim: np.ndarray, peer_claims: np.ndarray, peer_ranges: np.ndarray) -> float:
     """Sum of squared range residuals if the attacker broadcasts `claim`."""
     implied = np.linalg.norm(np.asarray(peer_claims, float) - np.asarray(claim, float), axis=1)
     return float(np.sum((implied - np.asarray(peer_ranges, float)) ** 2))
@@ -44,7 +41,7 @@ def _fibonacci_directions(n_dirs: int) -> np.ndarray:
     """Near-uniform unit vectors on the sphere, shape (n_dirs, 3)."""
     idx = np.arange(n_dirs, dtype=float) + 0.5
     polar = np.arccos(1.0 - 2.0 * idx / n_dirs)
-    azim = np.pi * (1.0 + 5.0 ** 0.5) * idx
+    azim = np.pi * (1.0 + 5.0**0.5) * idx
     return np.stack(
         [np.cos(azim) * np.sin(polar), np.sin(azim) * np.sin(polar), np.cos(polar)],
         axis=1,
@@ -58,7 +55,7 @@ def best_lie_at_displacement(
     displacement: float,
     n_dirs: int = 512,
     refine_top: int = 8,
-) -> Tuple[float, np.ndarray]:
+) -> tuple[float, np.ndarray]:
     """
     Cheapest consistent lie that moves the claim exactly `displacement` metres.
 
@@ -83,27 +80,24 @@ def best_lie_at_displacement(
 
     dirs = _fibonacci_directions(n_dirs)
     candidates = true_position[None, :] + displacement * dirs
-    costs = np.array(
-        [consistency_cost(c, peer_claims, peer_ranges) for c in candidates]
-    )
+    costs = np.array([consistency_cost(c, peer_claims, peer_ranges) for c in candidates])
 
     def angular_cost(angles: np.ndarray) -> float:
         polar, azim = angles
-        unit = np.array(
-            [np.cos(azim) * np.sin(polar), np.sin(azim) * np.sin(polar), np.cos(polar)]
-        )
-        return consistency_cost(
-            true_position + displacement * unit, peer_claims, peer_ranges
-        )
+        unit = np.array([np.cos(azim) * np.sin(polar), np.sin(azim) * np.sin(polar), np.cos(polar)])
+        return consistency_cost(true_position + displacement * unit, peer_claims, peer_ranges)
 
     best_cost = float(costs.min())
     best_claim = candidates[int(np.argmin(costs))]
     for k in np.argsort(costs)[: max(1, refine_top)]:
         unit = dirs[k]
-        start = np.array([np.arccos(np.clip(unit[2], -1.0, 1.0)),
-                          np.arctan2(unit[1], unit[0])])
-        res = minimize(angular_cost, start, method="Nelder-Mead",
-                       options={"xatol": 1e-6, "fatol": 1e-9, "maxiter": 400})
+        start = np.array([np.arccos(np.clip(unit[2], -1.0, 1.0)), np.arctan2(unit[1], unit[0])])
+        res = minimize(
+            angular_cost,
+            start,
+            method="Nelder-Mead",
+            options={"xatol": 1e-6, "fatol": 1e-9, "maxiter": 400},
+        )
         if float(res.fun) < best_cost:
             best_cost = float(res.fun)
             polar, azim = res.x

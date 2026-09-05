@@ -12,10 +12,10 @@ than the UWB ranging noise in sentrinet.sensing.uwb. That asymmetry is the
 entire basis of the cross-check: the radio is far more precise than the thing
 it is checking.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -34,8 +34,8 @@ def broadcast_claims(
     true_positions: np.ndarray,
     model: GnssModel,
     rng: np.random.Generator,
-    attacker: Optional[int] = None,
-    offset: Optional[np.ndarray] = None,
+    attacker: int | None = None,
+    offset: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Return each node's claimed self-position, shape (n_nodes, 3).
@@ -44,9 +44,7 @@ def broadcast_claims(
     node additionally claims `+ offset` — a spoof injected at the measurement
     level, with no assumption about how the attacker achieved it.
     """
-    claims = np.asarray(true_positions, dtype=float) + model.noise(
-        len(true_positions), rng
-    )
+    claims = np.asarray(true_positions, dtype=float) + model.noise(len(true_positions), rng)
     if attacker is not None:
         if offset is None:
             raise ValueError("attacker given without an offset")

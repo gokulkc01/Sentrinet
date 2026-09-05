@@ -1,14 +1,17 @@
 import csv
-from pathlib import Path
 import math
-import numpy as np
+from pathlib import Path
+
 import matplotlib
+import numpy as np
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+
 def read_rows(path):
     rows = []
-    with open(path, 'r', newline='') as f:
+    with open(path, newline='') as f:
         reader = csv.DictReader(f)
         for r in reader:
             r['capture_rate'] = float(r['capture_rate'])
