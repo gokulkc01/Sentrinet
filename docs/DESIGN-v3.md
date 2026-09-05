@@ -1,242 +1,278 @@
 # SentryNet v3 — Design Document
 
-**Status:** Approved plan. Phase 0 in progress.
-**Supersedes:** `docs/DESIGN.md` (v2). That document remains the record of Stages 0–3
-as planned; this one replaces its framing and its stage list from Stage 0.2 onward.
-**Last updated:** 2026-09-04
+**Status:** Approved plan, rewritten 2026-09-05 after a literature survey and a change of goal.
+**Supersedes:** `docs/DESIGN.md` (v2), and the 2026-09-04 revision of this file.
+**Rationale:** ADR-011 (the pivot), ADR-012 (utility-first reframe).
 
 ---
 
-## Thesis
+## Goal
 
-> **Cooperative integrity monitoring for GNSS-denied drone swarms** — detecting and
-> isolating a spoofed node from physical constraints that cannot be forged, validated
-> as a controlled study, packaged as a reusable benchmark.
+> **A position-integrity monitor for drone swarms that a real operator can run** —
+> catching any drone whose reported position cannot be trusted, whether the cause is an
+> attack, an RTK dropout, multipath, or a sensor fault.
 
-A node's GNSS-derived self-position can be spoofed. The time-of-flight of the radio
-link between two nodes cannot. Every detector in this project is built on that
-asymmetry: a node's *claimed* position must stay consistent with the ranges its peers
-physically measure to it.
+### Explicit non-goal: novelty
 
-This is the swarm-level generalisation of **RAIM** (Receiver Autonomous Integrity
-Monitoring). A single receiver uses redundant satellite measurements to detect and
-exclude a faulty one, and reports a protection level bounding its position error. Here
-the swarm uses redundant *peer* measurements — GNSS claims cross-checked against UWB
-ranges — to detect and exclude a faulty *node*.
+This is stated up front because it changes every downstream decision. **We are not
+trying to invent a new method.** The core principle — cross-check a drone's claimed
+GNSS position against inter-drone ranges the radio physically measures — is established
+prior art (see the survey below). We are engineering it into something usable, honest
+about its limits, and validated against reality.
 
----
+That inverts what was previously the project's largest risk. Prior art is no longer a
+threat to a novelty claim; it is a foundation to build on and cite.
 
-## Why v3 exists
+### What we optimise for instead
 
-### The inverted dependency
-
-In v2, the novel and defensible contribution — catching a spoofed node from physics —
-sat **downstream** of the least differentiated component: a learned multi-agent pursuit
-policy. Six ADRs of correct, careful debugging (ADR-005 → ADR-010) took System A from
-0% to ~44% capture against a scripted pursuer that scores 95–100%, still unconverged at
-1M steps, with entropy *rising*.
-
-That race is not winnable on the available hardware. At ~2 h per 1M steps on 12 CPU
-cores, the 10–50M steps that serious MARL results require is roughly a month of
-continuous compute for a single configuration. And the prize for winning is a drone
-pursuit controller, a problem classical methods already handle.
-
-The detection problem — where no clean classical answer exists in the mobile,
-sparse-connectivity, adaptive-adversary regime — trains **supervised, in minutes, on
-CPU**. v3 inverts the dependency: the integrity monitor becomes the product, the
-pursuit controller becomes scripted, and RL is demoted to an optional ablation on top
-of a working system.
-
-### The geometric argument
-
-A node claiming a 3-D position has **3 unknowns** and must satisfy **one range
-constraint per peer**:
-
-| Peers | Constraints | Consequence |
-|---|---|---|
-| 2 (N=3) | 2 | **Under-determined** — a continuum of consistent lies |
-| 3 (N=4) | 3 | Generically two solutions: the truth and its mirror |
-| 4+ (N≥5) | 4+ | **Over-determined** — generically only the truth |
-
-**...unless the peers are coplanar**, in which case the mirror solution survives at any
-swarm size. Drones holding a common altitude are nearly coplanar, so **altitude
-diversity is a security property**, not an aesthetic one.
-
-If this holds, the v2 negative result — "EMA trust degenerates into a global drop-rate
-meter" ([[Does Trust Actually Help]]) — was not a bad implementation. **At N=3 the
-detection problem is structurally unsolvable**, because a consistent lie always exists.
-No trust mechanism, learned or heuristic, could have worked. This turns ADR-002 (scale
-to 9 drones) from a heuristic into a necessity, and predicts a critical threshold near
-**N≈5**, with N=9 providing margin for colluding attackers and occlusion-severed links.
-
-**Occlusion removes links, which lowers effective peer count, which pushes a swarm back
-below the threshold.** Detectability is therefore a function of *effective
-connectivity* — and that is the headline result this project exists to produce.
+1. **Realism** — measured noise models, real flight dynamics, real failure modes.
+2. **Utility** — it solves a problem someone actually has, today.
+3. **Applicability** — it can be run where that problem exists, by the people who have it.
 
 ---
 
-## Phase 0 — The premise test (the gate)
+## The problem, and whose problem it is
 
-Standalone: no RL, no reward function, no `border_env`. Driver:
-`experiments/premise_test.py`. Modules: `sentrinet/{world,sensing,integrity,attacks}`.
+GNSS spoofing is real and large-scale: it now affects thousands of commercial flights
+daily, and cannot be fixed by cryptography, because a spoofed receiver reports — honestly
+— a position it genuinely believes.
 
-| Test | Question | Status |
-|---|---|---|
-| **1** | With no attacker, is the statistic actually χ² at the claimed dof? | ✅ **PASS** (per-node) |
-| **2** | Detection and false-alarm rate vs. a naive constant-offset spoofer | ✅ Measured |
-| **3** | Against an *adaptive* spoofer, does attacker capability collapse with N? | ✅ **PASS**, with corrections |
+But the crucial insight for utility is this:
 
-### Test 1 results (N=9, 2000 trials)
+> **A drone reporting a wrong position because of multipath, an RTK dropout, an
+> ionospheric event or a sensor fault produces exactly the same residual signature as a
+> spoofed one.** The detector cannot tell them apart, and for a real operator that is a
+> feature, not a limitation.
 
-| Model | dof | mean | expected | KS p |
-|---|---|---|---|---|
-| **per-node (full covariance)** | 8 | **8.054** | 8 | **0.691** ✅ |
-| global, rank-truncated | 21 | 20.65 | 21 | 0.001 |
-| global, naive dof *(control)* | 36 | 222.9 | 36 | 0 ❌ |
-| independence *(control)* | 36 | 36.18 | 36 | 5e-31 ❌ |
+Natural integrity faults are orders of magnitude more common than attacks. Designing for
+both at once turns a defence-sector tool into something ordinary swarm operators need.
 
-Two findings, both load-bearing:
+### Target user: commercial drone swarms, starting with light shows
 
-1. **The per-node attribution statistic is exactly χ².** This is the statistic the
-   method depends on, and it is well conditioned regardless of geometry.
-2. **The network-level statistic is gauge-degenerate.** Translating or rotating every
-   claim together leaves all pairwise residuals unchanged, so the Jacobian has a
-   six-dimensional null space and the residual lives in a subspace of dimension
-   `rank(J) = 3N − 6` — confirmed empirically at exactly 21 for N=9. Using one degree
-   of freedom per link inflates the statistic by 6×. After rank truncation the mean is
-   correct; the remaining tail error is first-order linearisation error, which scales
-   as `O(σ_g² / link_length)` and was confirmed by sweeping minimum separation
-   (mean 679 → 142 → 62 → 42 as separation goes 4 → 10 → 20 → 40 m).
+Drone light shows are the accessible instance of this problem, and the failure record is
+public: Hong Kong 2018 · Taichung 2020 · SeaTac 2024 · Orlando December 2024 (drones
+collided, one left the show airspace, a bystander was injured) · Ho Chi Minh City 2025 ·
+**Sydney Vivid Festival, May 2026 — roughly 89 drones dropped out of formation into the
+harbour.**
 
-The independence control fails exactly as designed: residuals sharing a node share that
-node's GNSS error, so treating them as independent gives the right *mean* but the wrong
-*distribution*.
+Two things make this the right target:
 
-### Test 2 results (N=9, 500 trials/point, α=10⁻³)
+- **The named failure mode is a common-mode fault.** When an RTK ground reference station
+  drops mid-show, every drone loses its correction *simultaneously*. That is precisely the
+  hardest case for a relative-only detector (see the honest limit below) — and precisely
+  the case a well-placed absolute anchor solves.
+- **The industry already describes our product.** Operators say they want multiple
+  independent sensor sets feeding simultaneous position estimators so that a bad reading
+  from one sensor is never trusted blindly. That is an integrity monitor.
 
-Honest residual noise floor `sqrt(2σ_g² + σ_r²)` = **2.12 m**.
+Secondary targets, same machinery: survey and agricultural swarms (RTK dropout, multipath
+near structures), urban delivery (canyon multipath). The defence and counter-UAS case is
+real but institutionally inaccessible to a solo builder; success in the commercial case is
+what makes it reachable later.
 
-| offset (m) | detection | correct isolation |
-|---|---|---|
-| 0 | *(false alarm 1.0%)* | — |
-| 3 | 0.046 | 0.008 |
-| 5 | 0.144 | 0.066 |
-| 8 | 0.528 | 0.324 |
-| 12 | 0.930 | 0.648 |
-| 20 | 0.996 | 0.800 |
+---
 
-- The false-alarm rate of 1.0% matches the predicted `n_nodes × α` — the model is
-  self-consistent.
-- **Single-epoch detection needs roughly 4σ of displacement.** Anything subtler is
-  invisible to a per-epoch test, which is the direct motivation for sequential
-  detection (CUSUM/SPRT) in phase E.
-- **Isolation lags detection badly** (80% vs. 99.6% at 20 m). A spoofed node biases its
-  honest peers' statistics too. Detection-vs-isolation is a real sub-problem, not a
-  detail.
+## Prior-art survey (2026-09-05)
 
-### Test 3 results (40 trials/point, medians)
+Conducted to find what to **reuse**, not to find a gap.
 
-The attacker solves for the cheapest *consistent* lie at a fixed displacement. The
-reported quantity is the largest displacement at which its best achievable RMS residual
-stays **below the 2.12 m noise floor** — i.e. how far it can move while remaining
-statistically invisible.
+### The core idea is established
 
-| N | peers | 3-D (15 m altitude spread) | peers coplanar, attacker off-plane |
-|---|---|---|---|
-| 3 | 2 | **≥30 m (unbounded)** | **≥30 m (unbounded)** |
-| 4 | 3 | 20 m | 20 m |
-| 5 | 4 | 15 m | 20 m |
-| 7 | 6 | 10 m | 20 m |
-| 9 | 8 | **5 m** | **20 m** |
+| Work | What it establishes |
+|---|---|
+| **Čapkun & Hubaux**, verifiable multilateration / secure positioning in wireless networks (2005–06) | The foundational secure-positioning result: distance-bounding from multiple verifiers lets you verify a claimed position. The ancestor of everything here. |
+| **arXiv:2301.12766** — *GPS-Spoofing Attack Detection Mechanism for UAV Swarms* | Our exact primitive, published: compare GPS-derived inter-drone distances against IR-UWB ranging, flag when the discrepancy exceeds a threshold. |
+| **arXiv:2312.03787** — *Detection and Mitigation of Position Spoofing Attacks on Cooperative UAV Swarm Formations* | Detection *and* mitigation for cooperative swarm formations. |
+| **Cooperative Integrity Monitoring (CIM)** literature — multi-sensor cooperative positioning, VANET "local integrity" | The concept already has a name and a body of work in the GNSS/vehicular community, with residual decomposition into common and specific parts and greedy exclusion. Outperforms standalone RAIM. |
 
-**Three findings.**
+**Consequence:** adopt the established terminology (*cooperative integrity monitoring*,
+*fault detection and exclusion*), cite this lineage, and stop describing the primitive as
+new.
 
-1. **N=3 is structurally broken, exactly as predicted.** The achievable residual is
-   literally **0.00 m** at displacements of 5, 10, 15 and 20 m — the attacker lies by 20
-   metres at zero cost. Two constraints, three unknowns: a continuum of perfectly
-   consistent lies. This is the structural cause of the v2 negative result, and it is
-   the claim the paper's motivation now rests on.
+### The honest limit — and it is recent, formal, and load-bearing
 
-2. **Attacker capability erodes monotonically with swarm size** — 30+ → 20 → 15 → 10 →
-   5 m. **The predicted sharp threshold at N≈5 did not appear**; the decline is smooth.
-   The "critical threshold" framing was too strong and is corrected to *monotone
-   erosion*, with a qualitative break only at N=3 (where the residual is exactly zero
-   rather than merely small).
+**arXiv:2608.06885** — *Rigid-Covert GNSS Spoofing of UAV Swarms: A Structural Blind
+Spot, Its Detection Limit, and Absolute-Anchor Defenses* (August 2026) is the single most
+important paper for this project.
 
-3. **Coplanar geometry cancels the benefit of swarm size entirely.** With peers in one
-   plane, N=9 is no better than N=4 — every size sits at 20 m. At N=9 that is a **4×
-   worse security posture from geometry alone**. The mirror solution's signature is
-   visible in the raw curve: the achievable residual *dips* near twice the attacker's
-   height above the peer plane, which is where its mirror image becomes reachable.
-   **Altitude diversity is therefore a hard security requirement**, and this is the more
-   operationally actionable of the two findings.
+Its Proposition 1: **any detector built on relative quantities alone is invariant under a
+common translation.** If every drone is shifted by the same vector, all inter-drone
+distances and all residuals are unchanged, and the attack is undetectable. They derive a
+drift-dependent detection floor and validate it (measured slope 2.66 against a predicted
+2.67, R² = 0.99).
 
-**Caveats:** 40 trials per point, medians, a single attacker, a fully connected mesh, and
-a static snapshot with no temporal accumulation. All four are tightened in phases C–F.
+**Our phase-0 Test 1 independently rediscovered this.** We measured `rank(J) = 3N − 6` —
+exactly the six gauge freedoms, three translation and three rotation. That is a strong
+validation of our implementation, and simultaneously tells us the ceiling of a pure
+relative approach.
 
-### Gate verdict: PASS
+Their proposed defence is what we adopt: **anchor-rooted recovery** — reconstruct swarm
+geometry from ranges via classical MDS, align it to trusted absolute anchors with RANSAC
+for Byzantine robustness, propagate corrected positions. Their code, configs and swarm
+harness are released.
 
-Test 1 clears the statistical model for the per-node statistic. Test 3 confirms the
-geometric thesis and, in correcting the threshold framing, sharpens it. Proceed to
-phase A.
+### What nobody has done — and it is exactly what "useful" requires
+
+Every result in this space is **simulation-only**. The rigid-covert authors state
+plainly that no RF transmission hardware was used in any experiment; their vision and
+ArduPilot SITL work is Gazebo-rendered. Their stated limitations include no physical
+swarm, ≥3 non-collinear honest anchors required, no tolerance above 50% compromised
+anchors, and RANSAC that does not sustain 10 Hz at N ≥ 64.
+
+The remaining gaps, all of which serve utility rather than novelty:
+
+1. **No grounding in measured hardware.** Ranging noise and NLoS bias are assumed, never
+   measured, for swarm integrity work.
+2. **No validation against real flight data.** Nothing runs these detectors over logs of
+   flights that actually happened.
+3. **Nobody targets an operator's real failure mode.** The literature models attacks;
+   operators mostly lose drones to faults.
+4. **Nothing is deployable.** No clean API, no flight-stack integration path.
+
+**That is where SentryNet goes.**
+
+### The insight that makes the blind spot tractable
+
+A pure relative detector is blind to a rigid common-mode shift. In the abstract that is
+fatal. **In our target deployment it is not**, because a drone light show already has
+surveyed absolute references: the RTK base station, the surveyed launch grid, ground
+cameras with known positions.
+
+So the deployment context supplies exactly the absolute anchor the theory says is
+required. The limitation that dooms this approach as pure research is **solvable in
+practice** — which is an argument for building it for real users rather than for a
+benchmark.
+
+---
+
+## What SentryNet is
+
+A monitor that consumes what a swarm already produces and answers one question per drone,
+every epoch: **can I trust this position?**
+
+**Inputs** — each drone's reported position; inter-drone range measurements; optionally
+one or more surveyed absolute anchors.
+
+**Method** — the established one, engineered properly:
+
+1. Per-link residual: claim-implied distance minus measured range.
+2. Normalise by the full residual covariance (**not** treating residuals as independent —
+   they share per-drone GNSS error; our Test 1 controls show that mistake gives the right
+   mean and the wrong distribution).
+3. Per-drone χ² statistic with a calibrated threshold — `alpha` **is** the false-alarm
+   rate, replacing v1's undefendable `max(0, 1 − error/5.0)`.
+4. Isolate the worst offender; exclude it from fusion.
+5. **Anchor-rooted recovery** for the common-mode case, per arXiv:2608.06885.
+
+**Outputs** — a per-drone trust verdict, an excluded set, a fused position estimate, and
+an operating-envelope statement: under these conditions, this is what the monitor can and
+cannot see.
+
+### What we deliberately do not build
+
+**No learned detector.** Under a Gaussian model the χ² test is already statistically
+near-optimal, so a neural network has nothing to learn; it would only help where the model
+is misspecified. More decisively, for a safety-conscious operator the χ² test is
+*explainable*, needs no training data, and has no model to maintain. Learning returns only
+if a **measured** real-world failure mode demands it. This removes a phase and makes the
+product more deployable, not less.
 
 ---
 
 ## Phases
 
-| Phase | Work | Deliverable | Gate |
-|---|---|---|---|
-| **−1** | Push branches, freeze v2, scaffold `sentrinet/` | Work off one disk | — |
-| **0** | Premise test (above) | Threshold figure | **HARD** |
-| **A** | Scripted pursuer; detector decoupled from RL; retire capture rate as primary metric | Deterministic testbed | — |
-| **B** | N=9, mesh topology, LoS raycast, DS-TWR + NLoS bias | `world/`, `sensing/` | — |
-| **C** | Threat scenarios S0–S4 + the adaptive range-consistent attacker | `attacks/`, YAML | — |
-| **D** | Classical baselines: χ² gating, trimmed mean, W-MSR, v1 EMA trust | `fusion/`, `baselines/` | **SOFT** |
-| **E** | Learned detector: supervised sequence model over residual features | `integrity/learned.py` | — |
-| **F** | Frontier sweeps: detectability vs. connectivity × attacker fraction × sophistication | **Headline figure** | — |
-| **G** | *(deferred)* UWB bench calibration against real hardware | measured noise model | — |
-| **H** | `pip install sentrinet`, scenarios, CI, repointed demo, paper | End products | — |
+| Phase | Work | Status |
+|---|---|---|
+| **0** | Premise test — validate the statistic and the geometry | ✅ Passed |
+| **A** | Scripted controller; detector decoupled from RL; capture rate retired | Next |
+| **B** | **Realism**: `gym-pybullet-drones` dynamics, N=9, mesh, LoS occlusion, DS-TWR ranging with NLoS bias, **temporally correlated GNSS error** | ~2 wk |
+| **C** | Threat + fault model: spoofing scenarios *and* RTK dropout, multipath, sensor fault. Includes the rigid common-mode case | ~1 wk |
+| **D** | Established baselines: χ² FDE, trimmed mean, W-MSR, anchor-rooted MDS+RANSAC, the v1 EMA module | ~1 wk |
+| **E** | **Anchor integration** — surveyed ground references, the light-show deployment case *(replaces the learned detector)* | ~1 wk |
+| **F** | **Operating envelope** — where the monitor works and where it is blind, as connectivity, fault fraction and anchor availability vary | ~1.5 wk |
+| **G** | **Hardware calibration** — bench UWB modules, measured noise and NLoS bias feeding back into B *(promoted from deferred)* | ~1 wk |
+| **H** | **Real-data validation**, packaging, live demo, write-up | ~3 wk |
 
-≈10–11 weeks part-time. Phase G is deferred by decision (2026-09-04); nothing in phases
-0–F depends on it.
+Two changes of emphasis from the previous plan: **the learned detector is gone**, and
+**hardware calibration is promoted** because realism is now a stated goal rather than a
+nice-to-have.
+
+### Phase H — validation against reality, ranked by evidence per hour
+
+1. **Real flight logs.** Multi-drone logs from a light-show operator, a university lab, or
+   a public dataset, run through the monitor. If it flags integrity events that actually
+   occurred, that is proof against reality rather than simulation.
+2. **ADS-B cross-check.** Aircraft broadcast GNSS-derived positions; ground and space-based
+   networks independently determine position. Same residual structure, real data, real
+   documented spoofing. Prior work exists (Stanford GPS Lab, ION GNSS+ 2024; Aireon), so
+   this is a validation path rather than a novel claim. Investigate feasibility early.
+3. **Bench-measured ranging**, feeding phase G back into the simulator.
+4. **A live, parameterised demo** — see below.
 
 ---
 
 ## Metrics
 
-Capture rate is **retired as a primary metric** — it is downstream, high-variance and
-policy-dependent. The replacements are the integrity-monitoring standard:
+Capture rate is retired. The monitor is judged as an integrity monitor:
 
-- **P(missed detection)** and **P(false alert)** — ROC, with a stated operating point
-- **Time-to-detect** — especially for slow-drift attacks (S2)
-- **False-accusation rate** on honest nodes
-- **Correct-isolation rate**, reported separately from detection
-- **Fused position error** under attack (the thing an operator actually cares about)
-- **Cooperative protection level** — a bound on swarm position error given observed
-  residuals and an assumed attacker fraction. Novel, and immediately legible to the
-  navigation community.
+- **P(missed detection)** and **P(false alert)**, with a stated operating point
+- **Time-to-detect**, especially for slow drift
+- **False-accusation rate** on honest drones
+- **Correct-isolation rate**, reported separately from detection — our Test 2 showed
+  isolation lags detection badly (80% vs 99.6% at 20 m)
+- **Fused position error** under fault or attack — what an operator actually feels
+- **Protection level** — a bound on swarm position error given observed residuals
 
 ---
 
-## Decisions taken
+## The demo
 
-- **Stage 0.2 (the v2 A/B/C "does trust help?" experiment) is dropped**, with its cost
-  recorded. See ADR-011. Phase 0's Test 3 now carries the paper's motivation.
-- **Hardware is deferred**, not cancelled. Sim-only until after the phase-0 gate.
-- **v2 code is frozen, not deleted.** Root-level scripts stay where they are;
-  `trust_module.py` is ported to `baselines/` as the thing to beat.
+A committed deliverable, not an afterthought — it is the only artifact that reaches people
+who will never read a ROC curve.
 
-## Out of scope
+**Two modes from one renderer.** `--live` runs and renders interactively, so a parameter
+can be changed in front of an audience (drop to 3 drones, watch the monitor go blind —
+the operating envelope demonstrated in ten seconds). `--record` writes frames from a
+saved state log for the case where a live run is not possible.
 
-GNSS signal processing and SDR (we work at the measurement level) · ROS 2 / Crazyswarm
-until hardware is committed · dashboard polish until phase H · geodetic frames (local
-ENU is sufficient) · Byzantine-consensus theory beyond r-robustness · MARL as a
-load-bearing component.
+**3-D is not the same decision as PyBullet.** The live view needs positions drawn in
+perspective, which the kinematic path plus a renderer provides without a physics server to
+lose. A 3-D main view carries the swarm and the altitude story; a flat inset — top-down
+plus per-drone χ² bars — carries the detection mechanism, which reads poorly in
+perspective.
+
+**What the frames must show:** each drone's true position with a ghost marker for its
+claim and a tether between them; the measured range ring the claim falls outside; the χ²
+bars crossing threshold on the right drone; and the fused estimate staying locked
+throughout.
+
+---
+
+## Scope
+
+**In:** realistic dynamics and error models · fault cases alongside attacks · absolute
+anchors · measured ranging · real-data validation · a deployable API · honest operating
+limits.
+
+**Out:** novelty claims · GNSS signal processing and SDR (we work at the measurement
+level) · a learned detector until a measured failure mode demands one · Byzantine
+consensus theory beyond what W-MSR needs · dashboard polish before phase H.
+
+## Positioning, stated honestly
+
+SentryNet does not introduce a new detection principle. It takes an established one —
+cooperative integrity monitoring via range/claim residuals — implements it with a
+correctly derived covariance and a calibrated threshold, extends it with anchor-rooted
+recovery for the common-mode blind spot that the literature has formally shown to be
+otherwise undetectable, grounds it in measured hardware and real flight data rather than
+assumed noise, and packages it so an operator can run it.
+
+That is an engineering contribution. It is the useful one.
 
 ---
 
 ## Related
 
-- `docs/DESIGN.md` — the v2 plan this supersedes
-- Vault: `decisions/ADR-011 - Pivot to Cooperative Integrity Monitoring`,
-  `planning/Roadmap`, `findings/Does Trust Actually Help`
+- ADR-011 (pivot to integrity monitoring) · ADR-012 (utility-first reframe)
+- `SentryNet-Vault/planning/Roadmap`, `findings/Does Trust Actually Help`
+- Phase-0 results: `results/premise/`
